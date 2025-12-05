@@ -192,17 +192,24 @@ def handle_app_closure(command_text):
 
 def handle_close_all():
     pkill_list = []
+
     for executable in APP_COMMANDS.values():
-        if 'flatpak' in executable:
+        # For flatpak apps, actual running process is the last token
+        if "flatpak" in executable:
             pkill_list.append(executable.split()[-1])
         else:
             pkill_list.append(executable.split()[0])
-            
+
     unique_executables = list(set(pkill_list))
-    
-    kill_cmd = ["pkill", "-f"] + unique_executables
-    subprocess.run(kill_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
+
+    # Kill each executable one by one (safer than packing into a single pkill)
+    for exe in unique_executables:
+        subprocess.run(
+            ["pkill", "-f", exe],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
     return "Closed all recognized user applications."
 
 # --- VOLUME/BRIGHTNESS HANDLERS (Unchanged) ---
@@ -223,8 +230,12 @@ def handle_volume(command_text):
 def handle_brightness(command_text):
     percent = _get_percentage(command_text)
     if percent is not None:
-        if not subprocess.getstatusoutput('which xbacklight')[0] == 0:
-            return "[{ASSISTANT_NAME}]: Brightness control requires 'xbacklight' (install using: sudo apt install xbacklight)."
+        if subprocess.getstatusoutput("which xbacklight")[0] != 0:
+            return (
+                f"[{ASSISTANT_NAME}]: Brightness control requires 'xbacklight' "
+                "(install using: sudo apt install xbacklight)."
+            )
+
         run_command(["xbacklight", "-set", str(percent)], need_sudo=False)
         return f"Setting brightness to {percent} percent."
     return f"Brightness command failed. Specify a percentage between 0 and 100."

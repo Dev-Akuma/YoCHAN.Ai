@@ -30,26 +30,48 @@ from config import (
 
 GRAMMAR_PHRASES = set()
 
-# 1) add all app names (keys in APP_COMMANDS) – includes user JSON overrides
+# 1) Add all app names (keys in APP_COMMANDS) – includes user JSON overrides
 for phrase in APP_COMMANDS.keys():
     GRAMMAR_PHRASES.add(phrase)
 
-# 2) add power/control words
-GRAMMAR_PHRASES.update([
-    "shutdown", "turn off", "restart", "reboot", "sleep", "suspend",
-    "logout", "log out", "log off",
-    "volume", "brightness",
-    "clipboard", "show clipboard",
-    "close all", "kill all",
-])
+# 2) Add power/control words
+GRAMMAR_PHRASES.update(
+    [
+        "shutdown",
+        "turn off",
+        "restart",
+        "reboot",
+        "sleep",
+        "suspend",
+        "logout",
+        "log out",
+        "log off",
+        "volume",
+        "brightness",
+        "clipboard",
+        "show clipboard",
+        "close all",
+        "kill all",
+    ]
+)
 
-# 3) common helper verbs + quit keyword
-GRAMMAR_PHRASES.update([
-    "open", "launch", "start", "run", "close", "quit", "exit", "die",
-])
+# 3) Common helper verbs + quit keyword
+GRAMMAR_PHRASES.update(
+    [
+        "open",
+        "launch",
+        "start",
+        "run",
+        "close",
+        "quit",
+        "exit",
+        "die",
+    ]
+)
+
 
 # =========================================================
-# === INITIALIZE MODELS (Run only once) ===================
+# === VALIDATION & MODEL INITIALIZATION ===================
 # =========================================================
 
 if not all([MODEL_PATH, ACCESS_KEY, WAKE_WORD_PATH]):
@@ -61,13 +83,47 @@ if not all([MODEL_PATH, ACCESS_KEY, WAKE_WORD_PATH]):
 
 # Sanity Check 1: Verify Vosk Model Path Exists
 if not os.path.isdir(MODEL_PATH):
-    print(f"\nFATAL ERROR: Vosk Model directory not found at: {MODEL_PATH}", file=sys.stderr)
+    print(
+        f"\nFATAL ERROR: Vosk Model directory not found at: {MODEL_PATH}",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
-# Sanity Check 2: Verify Porcupine Model File Exists
-if not os.path.isfile(WAKE_WORD_PATH):
-    print(f"\nFATAL ERROR: Porcupine Wake Word file not found at: {WAKE_WORD_PATH}", file=sys.stderr)
+
+def _resolve_keyword_paths(base_path: str):
+    """
+    Support both:
+      - Single wake-word file (old behavior)
+      - Directory containing multiple Porcupine keyword files (.ppn)
+        (for user-custom wake words)
+    """
+    if os.path.isfile(base_path):
+        return [base_path]
+
+    if os.path.isdir(base_path):
+        keyword_paths = []
+        for fname in os.listdir(base_path):
+            lower = fname.lower()
+            if lower.endswith(".ppn"):  # Porcupine keyword file
+                keyword_paths.append(os.path.join(base_path, fname))
+
+        if not keyword_paths:
+            print(
+                f"\nFATAL ERROR: No .ppn wake-word files found in directory: {base_path}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        return keyword_paths
+
+    print(
+        f"\nFATAL ERROR: Porcupine Wake Word path is neither a file nor directory: {base_path}",
+        file=sys.stderr,
+    )
     sys.exit(1)
+
+
+KEYWORD_PATHS = _resolve_keyword_paths(WAKE_WORD_PATH)
 
 try:
     VOSK_MODEL = Model(MODEL_PATH)
@@ -118,7 +174,13 @@ def listen_for_command():
 # === MAIN WAKE WORD LOOP =================================
 # =========================================================
 
-def run_yo_chan_listener():
+def run_assistant_listener():
+    """
+    Main wake-word listener loop.
+
+    Uses Porcupine + PvRecorder to detect one or more wake words
+    (from KEYWORD_PATHS) and then records a short command for Vosk.
+    """
     porcupine = None
     recorder = None
 
@@ -126,11 +188,14 @@ def run_yo_chan_listener():
     try:
         porcupine = pvporcupine.create(
             access_key=ACCESS_KEY,
-            keyword_paths=[WAKE_WORD_PATH],
-            sensitivities=[0.9],
+            keyword_paths=KEYWORD_PATHS,
+            sensitivities=[0.9] * len(KEYWORD_PATHS),
         )
     except Exception as e:
-        print(f"\nFATAL ERROR: Failed to initialize Porcupine. Details: {e}", file=sys.stderr)
+        print(
+            f"\nFATAL ERROR: Failed to initialize Porcupine. Details: {e}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     # 2. Initialize PvRecorder (Efficient Listener)
@@ -145,7 +210,6 @@ def run_yo_chan_listener():
             "Background listener is active.",
             icon="audio-volume-high",
         )
-
 
     except Exception as e:
         print(
@@ -162,7 +226,10 @@ def run_yo_chan_listener():
 
             # --- WAKE WORD DETECTED ---
             if keyword_index >= 0:
-                show_notification("{ASSISTANT_NAME}! Listening...", "Speak your command now.")
+                show_notification(
+                    ASSISTANT_DISPLAY_NAME,
+                    "Listening... Speak your command now.",
+                )
 
                 recorder.stop()
                 user_command = listen_for_command()
@@ -173,7 +240,10 @@ def run_yo_chan_listener():
                     if response == "QUIT_LISTENER":
                         break
                 else:
-                    show_notification("{ASSISTANT_NAME}! Error", "Command not detected. Try again.")
+                    show_notification(
+                        ASSISTANT_DISPLAY_NAME,
+                        "Command not detected. Please try again.",
+                    )
 
                 time.sleep(0.5)
                 recorder.start()
@@ -183,13 +253,26 @@ def run_yo_chan_listener():
     finally:
         # Crucial cleanup step to release resources
         if recorder is not None:
-            recorder.delete()
+            try:
+                recorder.delete()
+            except Exception:
+                # Fallback: just ignore if delete() is not available
+                pass
+
         if porcupine is not None:
-            porcupine.delete()
+            try:
+                porcupine.delete()
+            except Exception:
+                pass
 
         # FIX for Process Persistence: Send SIGTERM to the current process
         os.kill(os.getpid(), signal.SIGTERM)
 
 
+# Backwards-compatible name (old code may still call this)
+def run_yo_chan_listener():
+    run_assistant_listener()
+
+
 if __name__ == "__main__":
-    run_yo_chan_listener()
+    run_assistant_listener()
