@@ -220,6 +220,45 @@ def _get_percentage(command_text):
         return min(100, max(0, percent)) 
     return None
 
+# NEW: relative volume handler
+def handle_volume_relative(command_text, direction: str):
+    """
+    Adjust volume by a relative step using amixer.
+    direction: "up" or "down"
+    """
+    step = _get_percentage(command_text) or 5
+    op = "+" if direction == "up" else "-"
+    run_command(
+        ["amixer", "-D", "pulse", "sset", "Master", f"{step}%{op}"],
+        need_sudo=False,
+    )
+    if direction == "up":
+        return f"Increasing volume by {step} percent."
+    else:
+        return f"Decreasing volume by {step} percent."
+
+# NEW: relative brightness handler
+def handle_brightness_relative(command_text, direction: str):
+    """
+    Adjust brightness by a relative step using xbacklight.
+    direction: "up" or "down"
+    """
+    step = _get_percentage(command_text) or 10
+
+    # Ensure xbacklight exists
+    if subprocess.getstatusoutput("which xbacklight")[0] != 0:
+        return (
+            f"[{ASSISTANT_NAME}]: Brightness control requires 'xbacklight' "
+            "(install using: sudo apt install xbacklight)."
+        )
+
+    if direction == "up":
+        run_command(["xbacklight", "-inc", str(step)], need_sudo=False)
+        return f"Increasing brightness by {step} percent."
+    else:
+        run_command(["xbacklight", "-dec", str(step)], need_sudo=False)
+        return f"Decreasing brightness by {step} percent."
+
 def handle_volume(command_text):
     percent = _get_percentage(command_text)
     if percent is not None:
@@ -279,8 +318,33 @@ def execute_command(command_text):
         return show_result(handle_logout())
 
     # --- 3. CONTROL COMMANDS ---
+
+    # 3a. RELATIVE VOLUME: "volume up 5", "turn it up a bit", etc.
+    if "volume" in command_text and any(
+        word in command_text for word in ["up", "increase", "raise"]
+    ):
+        return show_result(handle_volume_relative(command_text, direction="up"))
+
+    if "volume" in command_text and any(
+        word in command_text for word in ["down", "decrease", "lower"]
+    ):
+        return show_result(handle_volume_relative(command_text, direction="down"))
+
+    # 3b. RELATIVE BRIGHTNESS: "bit brighter", "brightness down 10", etc.
+    if "brightness" in command_text and any(
+        word in command_text for word in ["up", "increase", "raise", "brighter"]
+    ):
+        return show_result(handle_brightness_relative(command_text, direction="up"))
+
+    if "brightness" in command_text and any(
+        word in command_text for word in ["down", "decrease", "lower", "darker", "dim"]
+    ):
+        return show_result(handle_brightness_relative(command_text, direction="down"))
+
+    # 3c. ABSOLUTE VOLUME / BRIGHTNESS
     if "volume" in command_text and any(word in command_text for word in ["set", "turn", "to"]):
         return show_result(handle_volume(command_text))
+
     if "brightness" in command_text and any(word in command_text for word in ["set", "turn", "to"]):
         return show_result(handle_brightness(command_text))
 

@@ -11,7 +11,7 @@ from pvrecorder import PvRecorder
 from vosk import Model, KaldiRecognizer
 import sounddevice as sd
 
-from yochan import execute_command, show_notification
+from yochan import show_notification
 from apps import APP_COMMANDS
 from config import (
     MODEL_PATH,
@@ -22,6 +22,7 @@ from config import (
     ASSISTANT_NAME,
     ASSISTANT_DISPLAY_NAME,
 )
+from ai_core import handle_voice_input  # <-- Phase 1: offline NLU/intents
 
 
 # =========================================================
@@ -66,6 +67,50 @@ GRAMMAR_PHRASES.update(
         "quit",
         "exit",
         "die",
+    ]
+)
+
+# 4) Extra natural-language phrases to help Vosk with contexty speech
+GRAMMAR_PHRASES.update(
+    [
+        # polite / filler stuff that often appears around commands
+        "please",
+        "can you",
+        "could you",
+        "will you",
+        "would you",
+        "yochan",
+        "yo chan",
+
+        # contextual pronouns
+        "close that",
+        "close it",
+        "open that",
+        "open it again",
+
+        # brightness phrases
+        "bit brighter",
+        "little brighter",
+        "bit darker",
+        "little darker",
+        "increase brightness",
+        "decrease brightness",
+        "lower brightness",
+        "raise brightness",
+        "dim it",
+
+        # volume phrases
+        "bit louder",
+        "little louder",
+        "bit quieter",
+        "little quieter",
+        "increase volume",
+        "decrease volume",
+        "lower volume",
+        "raise volume",
+        "turn it up",
+        "turn it down",
+        "mute",
     ]
 )
 
@@ -139,7 +184,7 @@ except Exception as e:
 # === SPEECH-TO-TEXT LISTENER =============================
 # =========================================================
 
-def listen_for_command():
+def listen_for_command() -> str:
     """
     Record LISTEN_DURATION seconds of audio and transcribe using Vosk,
     constrained by GRAMMAR_PHRASES for better accuracy.
@@ -180,6 +225,8 @@ def run_assistant_listener():
 
     Uses Porcupine + PvRecorder to detect one or more wake words
     (from KEYWORD_PATHS) and then records a short command for Vosk.
+    The recognized text is passed to ai_core.handle_voice_input for
+    offline, context-aware intent handling.
     """
     porcupine = None
     recorder = None
@@ -235,7 +282,14 @@ def run_assistant_listener():
                 user_command = listen_for_command()
 
                 if user_command:
-                    response = execute_command(user_command)
+                    # Phase 1: route through offline NLU/intent engine
+                    response = handle_voice_input(user_command)
+
+                    # Optional: show what was heard (useful for debugging)
+                    # show_notification(
+                    #     ASSISTANT_DISPLAY_NAME,
+                    #     f"Heard: '{user_command}'",
+                    # )
 
                     if response == "QUIT_LISTENER":
                         break

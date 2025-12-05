@@ -20,6 +20,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, filedialog, ttk
 import webbrowser
+from yochan_update import check_for_updates, apply_updates
 
 # Import project modules to discover paths
 try:
@@ -530,6 +531,42 @@ class EnvConfigFrame(tk.Frame):
 
         self._build_models_tab()
         self._build_system_tab()
+    
+    def check_updates_from_ui(self):
+        """
+        Check for YoChan updates using git and optionally apply them.
+
+        - Does NOT overwrite local changes: if the working tree is dirty,
+          it will refuse to auto-update and show a warning.
+        """
+        repo_dir = BASE_DIR
+
+        has_updates, is_dirty, status = check_for_updates(repo_dir)
+
+        if not has_updates:
+            # No new commits, just show info (still mention dirty if any).
+            messagebox.showinfo("YoChan Updates", status)
+            return
+
+        # There ARE updates
+        if is_dirty:
+            # Warn and abort auto-update
+            messagebox.showwarning("YoChan Updates", status)
+            return
+
+        # Clean and remote is ahead: ask user for confirmation
+        if not messagebox.askyesno(
+            "YoChan Updates",
+            status + "\n\nDo you want to update now?"
+        ):
+            return
+
+        ok, msg = apply_updates(repo_dir)
+        if ok:
+            messagebox.showinfo("YoChan Updates", msg)
+        else:
+            messagebox.showerror("YoChan Updates", msg)
+
 
     # ---------- MODELS / WAKE WORD TAB ----------
 
@@ -757,6 +794,17 @@ class EnvConfigFrame(tk.Frame):
         row += 1
         self.logout_entry = tk.Entry(f, width=60)
         self.logout_entry.grid(row=row, column=0, sticky="we", pady=(0, 5))
+        row += 1
+
+        updates_frame = tk.Frame(f)
+        updates_frame.grid(row=row, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
+        tk.Button(
+            updates_frame,
+            text="Check for YoChan updates",
+            command=self.check_updates_from_ui,
+        ).grid(row=0, column=0, padx=(0, 8))
+        
         row += 1
 
         # Buttons
