@@ -114,19 +114,19 @@ def _load_user_overrides():
             user_map = json.load(f)
 
         if not isinstance(user_map, dict):
-            print("[Yo-Chan] Warning: yochan_apps.user.json is not a JSON object, ignoring.",
+            print("[apps] Warning: yochan_apps.user.json is not a JSON object, ignoring.",
                   file=sys.stderr)
             return
 
         # merge: user overrides > defaults
         APP_COMMANDS.update(user_map)
-        print(f"[Yo-Chan] Loaded {len(user_map)} user app mappings from yochan_apps.user.json.",
+        print(f"[apps] Loaded {len(user_map)} user app mappings from yochan_apps.user.json.",
               file=sys.stderr)
 
     except json.JSONDecodeError as e:
-        print(f"[Yo-Chan] Error: Invalid JSON in yochan_apps.user.json: {e}", file=sys.stderr)
+        print(f"[apps] Error: Invalid JSON in yochan_apps.user.json: {e}", file=sys.stderr)
     except Exception as e:
-        print(f"[Yo-Chan] Error reading yochan_apps.user.json: {e}", file=sys.stderr)
+        print(f"[apps] Error reading yochan_apps.user.json: {e}", file=sys.stderr)
 
 
 # Run at import time so yochan.py gets the merged dict automatically

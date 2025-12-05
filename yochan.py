@@ -4,25 +4,35 @@ import re
 import os
 import sys
 import signal 
-from config import SHUTDOWN_CMD, REBOOT_CMD, SUSPEND_CMD, LOGOUT_CMD
-import difflib
+import difflib # For fuzzy matching
 
-# --- IMPORT MANUAL MAP ---
+# --- IMPORT CONFIGURATION ---
+from config import (
+    SHUTDOWN_CMD,
+    REBOOT_CMD,
+    SUSPEND_CMD,
+    LOGOUT_CMD,
+    FUZZY_THRESHOLD,
+    ASSISTANT_NAME,
+    ASSISTANT_DISPLAY_NAME,
+)
+
 from apps import APP_COMMANDS 
-# -------------------------
+# ----------------------------
 
 # ------------- CONFIG -------------
 USE_SUDO = True
 TERMINAL_APP = "xfce4-terminal"
 # ----------------------------------
 
+# --- FUZZY MATCHING HELPER ---
 def _match_app_fuzzy(cleaned_command):
     if not cleaned_command:
         return None
 
     candidates = list(APP_COMMANDS.keys())
-    # find top 1 close match with a decent cutoff
-    matches = difflib.get_close_matches(cleaned_command, candidates, n=1, cutoff=0.7)
+    # Find top 1 close match, using the configurable FUZZY_THRESHOLD
+    matches = difflib.get_close_matches(cleaned_command, candidates, n=1, cutoff=FUZZY_THRESHOLD)
     if matches:
         return matches[0]
     return None
@@ -30,7 +40,8 @@ def _match_app_fuzzy(cleaned_command):
 
 # --- GRACEFUL CLEANUP HANDLER (Remains the same) ---
 def cleanup_old_listeners():
-    # ... (function body remains the same) ...
+    """Finds and terminates any process running the yochan listener script."""
+    
     try:
         pids_output = subprocess.check_output(
             ["pgrep", "-f", "python.*yochan_listener.py"], 
@@ -51,22 +62,28 @@ def cleanup_old_listeners():
 # --- DISPLAY HANDLER (Notifications) ---
 def show_notification(title, message, icon="terminal"):
     try:
-        subprocess.run(["notify-send", "-t", "3000", "-i", icon, title, message], 
-                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(
+            ["notify-send", "-t", "3000", "-i", icon, title, message],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     except FileNotFoundError:
-        print(f"[Yo-Chan] Notification Failed: {title} - {message}", file=sys.stderr)
+        print(f"[{ASSISTANT_NAME}] Notification Failed: {title} - {message}", file=sys.stderr)
     except Exception as e:
-        print(f"[Yo-Chan] Notification Error: {e}", file=sys.stderr)
+        print(f"[{ASSISTANT_NAME}] Notification Error: {e}", file=sys.stderr)
+
 
 def show_result(message):
-    show_notification("Yo-Chan! Assistant", message)
-    print(f"\n[Yo-Chan]: {message}", file=sys.stderr)
+    show_notification(ASSISTANT_DISPLAY_NAME, message)
+    print(f"\n[{ASSISTANT_NAME}]: {message}", file=sys.stderr)
     return message
+
 
 
 # --- SYSTEM EXECUTION CORE ---
 def run_command(cmd, need_sudo=False):
-    # ... (function body remains the same) ...
+    """Executes a system command, blocking until completion (used for power/control/cleanup)."""
     try:
         if need_sudo and USE_SUDO:
             full_cmd = ["sudo"] + cmd
@@ -76,20 +93,19 @@ def run_command(cmd, need_sudo=False):
         subprocess.run(full_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return True
     except subprocess.CalledProcessError as e:
-        print(f"[Yo-Chan] Execution Error: Command '{' '.join(full_cmd)}' failed. Details: {e}", file=sys.stderr)
+        print(f"[{ASSISTANT_NAME}] Execution Error: Command '{' '.join(full_cmd)}' failed. Details: {e}", file=sys.stderr)
         return False
     except FileNotFoundError:
-        print(f"[Yo-Chan] Error: Executable '{cmd[0]}' not found. Check your map or installation.", file=sys.stderr)
+        print(f"[{ASSISTANT_NAME}] Error: Executable '{cmd[0]}' not found. Check your map or installation.", file=sys.stderr)
         return False
     except KeyboardInterrupt:
         return False
 
-# --- SYSTEM POWER HANDLERS (Unchanged) ---
+# --- SYSTEM POWER HANDLERS ---
 def handle_shutdown():
     cleanup_old_listeners()
-    # Optional: still call logout first if configured
     if LOGOUT_CMD:
-        handle_logout()
+        run_command(LOGOUT_CMD, need_sudo=False)
     if SHUTDOWN_CMD:
         run_command(SHUTDOWN_CMD, need_sudo=True)
     return "Shutting down system."
@@ -113,7 +129,6 @@ def handle_logout():
     else:
         return "Logout command is not configured for this desktop."
 
-
 # --- APPLICATION HANDLERS ---
 def handle_app_launch(app_name):
     app_executable = APP_COMMANDS.get(app_name)
@@ -132,28 +147,19 @@ def handle_app_launch(app_name):
     return None
 
 def handle_generic_launch(cleaned_command):
-    """
-    Fallback: try to launch the command directly if it's a valid executable.
-    Example: cleaned_command='gedit' -> run 'gedit' as is.
-    """
     if not cleaned_command:
         return None
-
-    # take the first token as the executable (in case the phrase is multi-word)
     tokens = cleaned_command.split()
     exe = tokens[0]
 
-    # Small guard: don't accidentally try to run generic words
     if exe in ("the", "a", "an", "it", "this"):
         return None
 
-    # Try to run it as a normal command (non-sudo)
     success = run_command([exe], need_sudo=False)
     if success:
         return f"Trying to open {exe}."
     else:
         return None
-
 
 def handle_app_closure(command_text):
     CLOSE_PHRASES = r'^(close|quit|terminate|end)\s*'
@@ -218,21 +224,19 @@ def handle_brightness(command_text):
     percent = _get_percentage(command_text)
     if percent is not None:
         if not subprocess.getstatusoutput('which xbacklight')[0] == 0:
-            return "[Yo-Chan]: Brightness control requires 'xbacklight' (install using: sudo apt install xbacklight)."
+            return "[{ASSISTANT_NAME}]: Brightness control requires 'xbacklight' (install using: sudo apt install xbacklight)."
         run_command(["xbacklight", "-set", str(percent)], need_sudo=False)
         return f"Setting brightness to {percent} percent."
     return f"Brightness command failed. Specify a percentage between 0 and 100."
 
-# --- NEW: CLIPBOARD HANDLERS ---
+# --- CLIPBOARD HANDLERS (Unchanged) ---
 def handle_clipboard_read():
     """Reads the current content of the clipboard (xclip)."""
     try:
-        # '-selection clipboard' targets the primary Ctl+C buffer
         result = subprocess.run(['xclip', '-o', '-selection', 'clipboard'], capture_output=True, text=True, check=True)
         content = result.stdout.strip()
         
         if content:
-            # Display a notification showing the copied content (user confirmation)
             show_notification("Clipboard Content", content[:50] + "..." if len(content) > 50 else content, icon="edit-copy")
             return f"Clipboard content shown."
         else:
@@ -245,7 +249,7 @@ def handle_clipboard_read():
 # --- MASTER EXECUTION FUNCTION ---
 def execute_command(command_text):
     command_text = command_text.strip().lower()
-
+    
     CLEANUP_PATTERN = r"^(open|launch|start|run|the|a|i)\s*"
     CLOSE_PHRASES = ["close", "quit", "exit", "terminate", "end"]
 
@@ -270,12 +274,7 @@ def execute_command(command_text):
         return show_result(handle_brightness(command_text))
 
     # --- 4. CLIPBOARD COMMANDS ---
-    # Example: "show clipboard", "what's in the clipboard"
-    if "clipboard" in command_text and (
-        "show" in command_text
-        or "read" in command_text
-        or "what is" in command_text
-    ):
+    if "clipboard" in command_text and ("show" in command_text or "read" in command_text or "what is" in command_text):
         return show_result(handle_clipboard_read())
 
     # --- 5. CLOSE ALL APPS COMMAND ---
@@ -283,10 +282,10 @@ def execute_command(command_text):
         return show_result(handle_close_all())
 
     # --- 6. APPLICATION LAUNCH/CLOSE COMMANDS ---
+    
     if any(phrase in command_text for phrase in CLOSE_PHRASES):
         return show_result(handle_app_closure(command_text))
 
-    # Strip helper words (open/launch/etc.)
     cleaned_command = re.sub(CLEANUP_PATTERN, "", command_text).strip()
 
     # 6a. Exact match in APP_COMMANDS

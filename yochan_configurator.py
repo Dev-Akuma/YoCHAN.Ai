@@ -10,6 +10,8 @@ A small GUI for:
    - ACCESS_KEY
    - LISTEN_DURATION
    - SHUTDOWN_COMMAND / REBOOT_COMMAND / SUSPEND_COMMAND / LOGOUT_COMMAND
+   - FUZZY_THRESHOLD
+   - ASSISTANT_NAME
 """
 
 import json
@@ -21,12 +23,12 @@ import webbrowser
 
 # Import project modules to discover paths
 try:
-    import apps  # for locating apps.py + yochan_apps.user.json
+    import apps
 except ImportError:
     apps = None
 
 try:
-    import config  # for BASE_DIR / .env
+    import config
 except ImportError:
     config = None
 
@@ -59,6 +61,8 @@ ENV_KEYS = [
     "REBOOT_COMMAND",
     "SUSPEND_COMMAND",
     "LOGOUT_COMMAND",
+    "FUZZY_THRESHOLD",
+    "ASSISTANT_NAME",
 ]
 
 
@@ -66,7 +70,7 @@ def read_env_file(path: Path) -> dict:
     """
     Very simple .env parser:
     - Lines like KEY=VALUE
-    - Ignores blank lines and comments (#...)
+    - Ignores blank lines and comments
     - Returns dict of key->value (strings)
     """
     env = {}
@@ -85,7 +89,7 @@ def read_env_file(path: Path) -> dict:
                 key, value = stripped.split("=", 1)
                 env[key.strip()] = value.strip()
     except Exception as e:
-        print(f"[Yo-Chan Configurator] Error reading .env: {e}")
+        print(f"[Configurator] Error reading .env: {e}")
     return env
 
 
@@ -93,8 +97,6 @@ def write_env_file(path: Path, updates: dict):
     """
     Update specific keys in .env while preserving other lines
     and comments as much as possible.
-
-    - 'updates' is a dict {KEY: VALUE or ''}. Empty string means "set but blank".
     """
     lines = []
     existing_env = {}
@@ -156,322 +158,7 @@ class AppMapperFrame(tk.Frame):
     """
     Manages yochan_apps.user.json:
     - spoken phrase -> command
-    Also provides a scanner for installed desktop apps.
-    """
-
-    def __init__(self, master):
-        super().__init__(master)
-
-        self.mappings = {}
-        self.selected_key = None
-
-        # For scanner
-        self.scanned_apps = []  # list of dicts: {name, exec, path}
-        self.scanner_window = None
-
-        # Left side: list of phrases
-        left_frame = tk.Frame(self)
-        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        tk.Label(left_frame, text="Spoken Phrases").pack(anchor="w")
-
-        self.listbox = tk.Listbox(left_frame, width=30)
-        self.listbox.pack(fill=tk.BOTH, expand=True)
-        self.listbox.bind("<<ListboxSelect>>", self.on_select)
-
-        # Right side: details and buttons
-        right_frame = tk.Frame(self)
-        right_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=10, pady=10)
-
-        # Phrase field
-        tk.Label(right_frame, text="Spoken phrase:").grid(row=0, column=0, sticky="w")
-        self.phrase_entry = tk.Entry(right_frame, width=35)
-        self.phrase_entry.grid(row=1, column=0, sticky="we", pady=(0, 10))
-
-        # Command field
-        tk.Label(right_frame, text="Command to execute:").grid(row=2, column=0, sticky="w")
-        self.command_entry = tk.Entry(right_frame, width=35)
-        self.command_entry.grid(row=3, column=0, sticky="we", pady=(0, 10))
-
-        # Buttons
-        btn_frame = tk.Frame(right_frame)
-        btn_frame.grid(row=4, column=0, pady=10, sticky="we")
-
-        tk.Button(btn_frame, text="Add / Update", command=self.add_or_update).grid(row=0, column=0, padx=2)
-        tk.Button(btn_frame, text="Delete", command=self.delete_selected).grid(row=0, column=1, padx=2)
-        tk.Button(btn_frame, text="Save JSON", command=self.save_to_disk).grid(row=0, column=2, padx=2)
-        tk.Button(btn_frame, text="Reload", command=self.reload_from_disk).grid(row=0, column=3, padx=2)
-
-        # Scanner button
-        tk.Button(
-            right_frame,
-            text="Scan Installed Apps",
-            command=self.open_app_scanner,
-        ).grid(row=5, column=0, pady=(5, 0), sticky="w")
-
-        # Status label
-        self.status_label = tk.Label(right_frame, text="", fg="grey")
-        self.status_label.grid(row=6, column=0, sticky="w", pady=(10, 0))
-
-        right_frame.columnconfigure(0, weight=1)
-
-        # Initial load
-        self.reload_from_disk(initial=True)
-
-    # ----- internal helpers -----
-
-    def set_status(self, text: str):
-        self.status_label.config(text=text)
-
-    def refresh_listbox(self):
-        self.listbox.delete(0, tk.END)
-        for key in sorted(self.mappings.keys()):
-            self.listbox.insert(tk.END, key)
-
-    def on_select(self, event):
-        if not self.listbox.curselection():
-            return
-        index = self.listbox.curselection()[0]
-        key = self.listbox.get(index)
-        self.selected_key = key
-
-        self.phrase_entry.delete(0, tk.END)
-        self.phrase_entry.insert(0, key)
-
-        cmd = self.mappings.get(key, "")
-        self.command_entry.delete(0, tk.END)
-        self.command_entry.insert(0, cmd)
-
-    def add_or_update(self):
-        phrase = self.phrase_entry.get().strip().lower()
-        cmd = self.command_entry.get().strip()
-
-        if not phrase:
-            messagebox.showwarning("Missing phrase", "Please enter a spoken phrase.")
-            return
-        if not cmd:
-            messagebox.showwarning("Missing command", "Please enter a command to execute.")
-            return
-
-        self.mappings[phrase] = cmd
-        self.refresh_listbox()
-        self.set_status(f"Mapping saved: '{phrase}' → {cmd}")
-
-    def delete_selected(self):
-        if not self.listbox.curselection():
-            messagebox.showinfo("No selection", "Select a phrase to delete.")
-            return
-
-        index = self.listbox.curselection()[0]
-        key = self.listbox.get(index)
-
-        if messagebox.askyesno("Delete mapping", f"Delete mapping for '{key}'?"):
-            self.mappings.pop(key, None)
-            self.refresh_listbox()
-            self.phrase_entry.delete(0, tk.END)
-            self.command_entry.delete(0, tk.END)
-            self.selected_key = None
-            self.set_status(f"Deleted mapping for '{key}'")
-
-    def save_to_disk(self):
-        try:
-            CONFIG_PATH_JSON.parent.mkdir(parents=True, exist_ok=True)
-            with CONFIG_PATH_JSON.open("w", encoding="utf-8") as f:
-                json.dump(self.mappings, f, indent=4, ensure_ascii=False)
-            self.set_status(f"Saved {len(self.mappings)} mappings to {CONFIG_PATH_JSON}")
-        except Exception as e:
-            messagebox.showerror("Save error", f"Could not save config:\n{e}")
-
-    def reload_from_disk(self, initial=False):
-        if CONFIG_PATH_JSON.exists():
-            try:
-                with CONFIG_PATH_JSON.open("r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, dict):
-                    self.mappings = {str(k): str(v) for k, v in data.items()}
-                else:
-                    messagebox.showwarning(
-                        "Invalid config",
-                        "yochan_apps.user.json is not a JSON object. Starting with empty mappings.",
-                    )
-                    self.mappings = {}
-            except json.JSONDecodeError as e:
-                messagebox.showerror("Config error", f"Invalid JSON in yochan_apps.user.json:\n{e}")
-                self.mappings = {}
-            except Exception as e:
-                messagebox.showerror("Read error", f"Could not read yochan_apps.user.json:\n{e}")
-                self.mappings = {}
-        else:
-            self.mappings = {}
-
-        self.refresh_listbox()
-        if not initial:
-            self.set_status(f"Reloaded {len(self.mappings)} mappings from disk.")
-
-    # ----- APP SCANNER -----
-
-    def open_app_scanner(self):
-        """Open a popup that lists installed desktop apps (.desktop files)."""
-        self.scanned_apps = self._scan_installed_apps()
-
-        if not self.scanned_apps:
-            messagebox.showinfo(
-                "No apps found",
-                "Could not find any .desktop files in standard locations.\n"
-                "Checked /usr/share/applications and ~/.local/share/applications.",
-            )
-            return
-
-        if self.scanner_window is not None and tk.Toplevel.winfo_exists(self.scanner_window):
-            # if it's already open, just bring it to front
-            self.scanner_window.lift()
-            return
-
-        self.scanner_window = tk.Toplevel(self)
-        self.scanner_window.title("Installed Applications")
-        self.scanner_window.geometry("600x400")
-
-        tk.Label(self.scanner_window, text="Double-click an app or select + Use:").pack(anchor="w", padx=10, pady=(10, 0))
-
-        list_frame = tk.Frame(self.scanner_window)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        self.scanner_listbox = tk.Listbox(list_frame)
-        self.scanner_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        scrollbar = tk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.scanner_listbox.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.scanner_listbox.config(yscrollcommand=scrollbar.set)
-
-        # Populate listbox
-        for app in self.scanned_apps:
-            # Show "Name — Exec"
-            display = f"{app['name']}  —  {app['exec']}"
-            self.scanner_listbox.insert(tk.END, display)
-
-        # Bind double-click
-        self.scanner_listbox.bind("<Double-Button-1>", self._use_selected_app_from_scanner)
-
-        # Buttons
-        btn_frame = tk.Frame(self.scanner_window)
-        btn_frame.pack(pady=(0, 10))
-
-        tk.Button(
-            btn_frame,
-            text="Use Selected",
-            command=self._use_selected_app_from_scanner,
-        ).grid(row=0, column=0, padx=5)
-
-        tk.Button(
-            btn_frame,
-            text="Close",
-            command=self.scanner_window.destroy,
-        ).grid(row=0, column=1, padx=5)
-
-    def _scan_installed_apps(self):
-        """
-        Scan common .desktop directories and return a list of:
-        { 'name': ..., 'exec': ..., 'path': ... }
-        """
-        results = []
-        desktop_dirs = [
-            Path("/usr/share/applications"),
-            Path.home() / ".local/share/applications",
-        ]
-
-        for d in desktop_dirs:
-            if not d.is_dir():
-                continue
-            for desktop_file in d.glob("*.desktop"):
-                app_info = self._parse_desktop_file(desktop_file)
-                if app_info:
-                    results.append(app_info)
-
-        # Sort by name for nicer display
-        results.sort(key=lambda a: a["name"].lower())
-        return results
-
-    def _parse_desktop_file(self, path: Path):
-        """
-        Parse a .desktop file to extract Name= and Exec=.
-        Ignore NoDisplay=true entries.
-        """
-        name = None
-        exec_cmd = None
-        nodisplay = False
-
-        try:
-            with path.open("r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    stripped = line.strip()
-                    if not stripped or stripped.startswith("#"):
-                        continue
-
-                    if stripped.startswith("Name=") and name is None:
-                        name = stripped[len("Name="):].strip()
-
-                    elif stripped.startswith("Exec=") and exec_cmd is None:
-                        exec_cmd = stripped[len("Exec="):].strip()
-
-                    elif stripped.startswith("NoDisplay="):
-                        # e.g., NoDisplay=true
-                        if "true" in stripped.split("=", 1)[1].strip().lower():
-                            nodisplay = True
-
-            if not name or not exec_cmd or nodisplay:
-                return None
-
-            # Clean Exec command:
-            # - .desktop Exec lines can have placeholders like %U, %F, etc.
-            #   We'll strip any tokens starting with '%'.
-            exec_parts = exec_cmd.split()
-            clean_parts = [p for p in exec_parts if not p.startswith("%")]
-            exec_clean = " ".join(clean_parts).strip()
-
-            if not exec_clean:
-                return None
-
-            return {
-                "name": name,
-                "exec": exec_clean,
-                "path": str(path),
-            }
-
-        except Exception:
-            return None
-
-    def _use_selected_app_from_scanner(self, event=None):
-        """Use currently selected app from the scanner window to pre-fill phrase/command."""
-        if self.scanner_window is None or not tk.Toplevel.winfo_exists(self.scanner_window):
-            return
-
-        selection = self.scanner_listbox.curselection()
-        if not selection:
-            messagebox.showinfo("No selection", "Please select an application from the list.")
-            return
-
-        index = selection[0]
-        app = self.scanned_apps[index]
-
-        # Suggested phrase: lowercase name (user can edit it)
-        phrase_suggestion = app["name"].lower()
-
-        self.phrase_entry.delete(0, tk.END)
-        self.phrase_entry.insert(0, phrase_suggestion)
-
-        self.command_entry.delete(0, tk.END)
-        self.command_entry.insert(0, app["exec"])
-
-        self.set_status(f"Loaded from scanner: '{phrase_suggestion}' → {app['exec']}")
-
-        # Optionally close scanner window:
-        # self.scanner_window.destroy()
-
-class AppMapperFrame(tk.Frame):
-    """
-    Manages yochan_apps.user.json:
-    - spoken phrase -> command
-    Also provides a scanner for installed desktop apps.
+    Also provides a scanner for installed desktop apps (with search).
     """
 
     def __init__(self, master):
@@ -819,14 +506,12 @@ class AppMapperFrame(tk.Frame):
         # Optional: close scanner
         # self.scanner_window.destroy()
 
+
 # ----------------- ENV / MODEL / SYSTEM TAB -----------------
 
 class EnvConfigFrame(tk.Frame):
     """
-    Manages .env keys:
-
-    MODEL_PATH, WAKE_WORD_PATH, ACCESS_KEY, LISTEN_DURATION,
-    SHUTDOWN_COMMAND, REBOOT_COMMAND, SUSPEND_COMMAND, LOGOUT_COMMAND
+    Manages .env keys.
     """
 
     def __init__(self, master):
@@ -834,7 +519,6 @@ class EnvConfigFrame(tk.Frame):
 
         self.env_values = read_env_file(ENV_PATH)
 
-        # Use a notebook inside: Models/Wake Word, System
         nb = ttk.Notebook(self)
         nb.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -842,7 +526,7 @@ class EnvConfigFrame(tk.Frame):
         self.system_frame = tk.Frame(nb)
 
         nb.add(self.models_frame, text="Models & Wake Word")
-        nb.add(self.system_frame, text="System & Timing")
+        nb.add(self.system_frame, text="System & Tuning")
 
         self._build_models_tab()
         self._build_system_tab()
@@ -877,6 +561,25 @@ class EnvConfigFrame(tk.Frame):
         self.access_entry.grid(row=row, column=0, sticky="we", pady=(0, 5))
         row += 1
 
+        # ASSISTANT_NAME (optional)
+        tk.Label(
+            f,
+            text="Assistant name (optional, overrides name derived from wake word):"
+        ).grid(row=row, column=0, sticky="w")
+        row += 1
+        self.assistant_name_entry = tk.Entry(f, width=60)
+        self.assistant_name_entry.grid(row=row, column=0, sticky="we", pady=(0, 5))
+        row += 1
+
+        # Preview label (computed from assistant name / wake word)
+        self.assistant_preview_label = tk.Label(
+            f,
+            text="",
+            fg="grey",
+        )
+        self.assistant_preview_label.grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        row += 1
+
         # Helpful links
         links_frame = tk.Frame(f)
         links_frame.grid(row=row, column=0, columnspan=2, pady=(5, 5), sticky="w")
@@ -904,14 +607,10 @@ class EnvConfigFrame(tk.Frame):
 
         f.columnconfigure(0, weight=1)
 
-        # Fill current values
+        # Fill current values + preview
         self.reload_from_env()
 
-    def open_vosk_models_page(self):
-        webbrowser.open("https://alphacephei.com/vosk/models")
-
-    def open_picovoice_console(self):
-        webbrowser.open("https://console.picovoice.ai/")
+    # --- MODEL BROWSER / LINKS HANDLERS ---
 
     def browse_model_dir(self):
         directory = filedialog.askdirectory(
@@ -931,6 +630,55 @@ class EnvConfigFrame(tk.Frame):
         if file_path:
             self.wake_entry.delete(0, tk.END)
             self.wake_entry.insert(0, file_path)
+        self.update_assistant_preview()
+
+    def open_vosk_models_page(self):
+        webbrowser.open("https://alphacephei.com/vosk/models")
+
+    def open_picovoice_console(self):
+        webbrowser.open("https://console.picovoice.ai/")
+
+    def update_assistant_preview(self):
+        """
+        Compute a preview of the assistant display name based on:
+        - ASSISTANT_NAME field if set
+        - otherwise derive from WAKE_WORD_PATH filename
+        - fallback to 'Assistant'
+        """
+        # 1) explicit assistant name, if any
+        explicit = self.assistant_name_entry.get().strip() if hasattr(self, "assistant_name_entry") else ""
+
+        if explicit:
+            base = explicit
+        else:
+            # 2) derive from wake word path
+            wake_path = self.wake_entry.get().strip() if hasattr(self, "wake_entry") else ""
+            base = ""
+            if wake_path:
+                filename = os.path.basename(wake_path)
+                name, _ext = os.path.splitext(filename)
+                # clean up common filename patterns: underscores/dashes → spaces
+                name = name.replace("_", " ").replace("-", " ").strip()
+                # strip typical porcupine suffixes like "_linux"
+                for suffix in (" linux", "mac", "windows"):
+                    if name.lower().endswith(suffix):
+                        name = name[: -len(suffix)].strip()
+                base = name.title()
+
+            if not base:
+                base = "Assistant"
+
+        base = base.strip() or "Assistant"
+
+        if base.endswith("!"):
+            display = f"{base} Assistant"
+        else:
+            display = f"{base}! Assistant"
+
+        if hasattr(self, "assistant_preview_label"):
+            self.assistant_preview_label.config(
+                text=f"Current assistant display name will be:  {display}"
+            )
 
     def reload_from_env(self):
         self.env_values = read_env_file(ENV_PATH)
@@ -944,14 +692,23 @@ class EnvConfigFrame(tk.Frame):
         self.access_entry.delete(0, tk.END)
         self.access_entry.insert(0, self.env_values.get("ACCESS_KEY", ""))
 
+        self.assistant_name_entry.delete(0, tk.END)
+        self.assistant_name_entry.insert(0, self.env_values.get("ASSISTANT_NAME", ""))
+
+        # update preview label
+        self.update_assistant_preview()
+
     def save_models_to_env(self):
         updates = {
             "MODEL_PATH": self.model_entry.get().strip(),
             "WAKE_WORD_PATH": self.wake_entry.get().strip(),
             "ACCESS_KEY": self.access_entry.get().strip(),
+            "ASSISTANT_NAME": self.assistant_name_entry.get().strip(),
         }
+
         write_env_file(ENV_PATH, updates)
-        messagebox.showinfo("Saved", "Model / wake word settings saved to .env.")
+        self.update_assistant_preview()
+        messagebox.showinfo("Saved", "Model / wake word / assistant settings saved to .env.")
 
     # ---------- SYSTEM / TIMING TAB ----------
 
@@ -967,11 +724,18 @@ class EnvConfigFrame(tk.Frame):
         self.listen_entry.grid(row=row, column=0, sticky="w", pady=(0, 10))
         row += 1
 
+        # FUZZY_THRESHOLD
+        tk.Label(f, text="FUZZY_THRESHOLD (0.0 to 1.0, 1.0 = Exact Match):").grid(row=row, column=0, sticky="w")
+        row += 1
+        self.fuzzy_entry = tk.Entry(f, width=10)
+        self.fuzzy_entry.grid(row=row, column=0, sticky="w", pady=(0, 10))
+        row += 1
+
         # Power commands
         tk.Label(f, text="Power commands (optional overrides):").grid(row=row, column=0, sticky="w")
         row += 1
 
-        tk.Label(f, text="SHUTDOWN_COMMAND:").grid(row=row, column=0, sticky="w")
+        tk.Label(f, text="SHUTDOWN_COMMAND (e.g., systemctl poweroff):").grid(row=row, column=0, sticky="w")
         row += 1
         self.shutdown_entry = tk.Entry(f, width=60)
         self.shutdown_entry.grid(row=row, column=0, sticky="we", pady=(0, 5))
@@ -1012,6 +776,9 @@ class EnvConfigFrame(tk.Frame):
         self.listen_entry.delete(0, tk.END)
         self.listen_entry.insert(0, self.env_values.get("LISTEN_DURATION", ""))
 
+        self.fuzzy_entry.delete(0, tk.END)
+        self.fuzzy_entry.insert(0, self.env_values.get("FUZZY_THRESHOLD", ""))
+
         self.shutdown_entry.delete(0, tk.END)
         self.shutdown_entry.insert(0, self.env_values.get("SHUTDOWN_COMMAND", ""))
 
@@ -1025,15 +792,34 @@ class EnvConfigFrame(tk.Frame):
         self.logout_entry.insert(0, self.env_values.get("LOGOUT_COMMAND", ""))
 
     def save_system_to_env(self):
+        # Validation for duration and threshold
+        duration_str = self.listen_entry.get().strip()
+        threshold_str = self.fuzzy_entry.get().strip()
+
+        if duration_str:
+            if not duration_str.isdigit() or int(duration_str) < 1:
+                messagebox.showwarning("Validation Error", "LISTEN_DURATION must be a positive integer (seconds).")
+                return
+
+        if threshold_str:
+            try:
+                threshold = float(threshold_str)
+                if not (0.0 <= threshold <= 1.0):
+                    raise ValueError
+            except ValueError:
+                messagebox.showwarning("Validation Error", "FUZZY_THRESHOLD must be a number between 0.0 and 1.0.")
+                return
+
         updates = {
-            "LISTEN_DURATION": self.listen_entry.get().strip(),
+            "LISTEN_DURATION": duration_str,
+            "FUZZY_THRESHOLD": threshold_str,
             "SHUTDOWN_COMMAND": self.shutdown_entry.get().strip(),
             "REBOOT_COMMAND": self.reboot_entry.get().strip(),
             "SUSPEND_COMMAND": self.suspend_entry.get().strip(),
             "LOGOUT_COMMAND": self.logout_entry.get().strip(),
         }
         write_env_file(ENV_PATH, updates)
-        messagebox.showinfo("Saved", "System / timing settings saved to .env.")
+        messagebox.showinfo("Saved", "System / tuning settings saved to .env.")
 
 
 # ----------------- ROOT APP -----------------
@@ -1041,7 +827,13 @@ class EnvConfigFrame(tk.Frame):
 class YoChanConfiguratorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Yo-Chan Configurator")
+
+        assistant_title = "Assistant"
+        if config is not None and hasattr(config, "ASSISTANT_NAME"):
+            if getattr(config, "ASSISTANT_NAME"):
+                assistant_title = config.ASSISTANT_NAME
+
+        self.root.title(f"{assistant_title} Configurator")
 
         # Optional: a bit of default window size
         self.root.geometry("800x500")

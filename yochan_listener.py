@@ -19,7 +19,10 @@ from config import (
     ACCESS_KEY,
     WAKE_WORD_PATH,
     VOSK_SAMPLE_RATE,
+    ASSISTANT_NAME,
+    ASSISTANT_DISPLAY_NAME,
 )
+
 
 # =========================================================
 # === BUILD GRAMMAR FOR VOSK (LIMIT VOCABULARY) ===========
@@ -107,7 +110,7 @@ def listen_for_command():
         return command
 
     except Exception as e:
-        print(f"[Yo-Chan] STT Error: {e}", file=sys.stderr)
+        print(f"[{ASSISTANT_NAME}] STT Error: {e}", file=sys.stderr)
         return ""
 
 
@@ -138,10 +141,11 @@ def run_yo_chan_listener():
         )
         recorder.start()
         show_notification(
-            "Yo-Chan! Assistant",
+            ASSISTANT_DISPLAY_NAME,
             "Background listener is active.",
             icon="audio-volume-high",
         )
+
 
     except Exception as e:
         print(
@@ -158,7 +162,7 @@ def run_yo_chan_listener():
 
             # --- WAKE WORD DETECTED ---
             if keyword_index >= 0:
-                show_notification("Yo-Chan! Listening...", "Speak your command now.")
+                show_notification("{ASSISTANT_NAME}! Listening...", "Speak your command now.")
 
                 recorder.stop()
                 user_command = listen_for_command()
@@ -169,7 +173,7 @@ def run_yo_chan_listener():
                     if response == "QUIT_LISTENER":
                         break
                 else:
-                    show_notification("Yo-Chan! Error", "Command not detected. Try again.")
+                    show_notification("{ASSISTANT_NAME}! Error", "Command not detected. Try again.")
 
                 time.sleep(0.5)
                 recorder.start()
