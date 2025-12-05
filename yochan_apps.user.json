@@ -1,7 +1,7 @@
 {
-  "browser": "firefox",
-  "music": "spotify",
-  "editor": "code",
-  "code editor": "code",
-  "yt": "flatpak run com.github.unofficial-youtube-client"
+    "browser": "firefox",
+    "music": "spotify",
+    "editor": "code",
+    "code editor": "code",
+    "whatsapp": "/opt/brave.com/brave/brave-browser --profile-directory=Default --app-id=hnpfjngllnobngcgfapefoaidbinmjnm"
 }
