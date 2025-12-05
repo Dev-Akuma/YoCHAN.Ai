@@ -173,6 +173,11 @@ if [ -f ".env" ]; then
     echo "6) .env already exists – we will update relevant keys."
 else
     echo "6) Creating .env from config.template.env..."
+    if [ ! -f "config.template.env" ]; then
+        echo "ERROR: config.template.env not found. Cannot create .env."
+        deactivate || true
+        exit 1
+    fi
     cp config.template.env .env
 fi
 
@@ -181,6 +186,19 @@ DEFAULT_MODEL_PATH="$MODEL_DIR/$MODEL_UNZIPPED_DIR"
 update_env_var "MODEL_PATH" "$DEFAULT_MODEL_PATH"
 
 # We'll fill WAKE_WORD_PATH after we ask for the .ppn path.
+
+# =====================================================
+# 6.5) CREATE yochan_apps.user.json (IF MISSING)
+# =====================================================
+APPS_FILE="yochan_apps.user.json"
+
+if [ -f "$APPS_FILE" ]; then
+    echo "[OK] $APPS_FILE already exists."
+else
+    echo "[INFO] Creating default $APPS_FILE..."
+    echo "{}" > "$APPS_FILE"
+    echo "[OK] User app override file created."
+fi
 
 # =====================================================
 # 7) ASK FOR PICOVOICE ACCESS KEY
@@ -249,7 +267,7 @@ if ask_yes_no "Do you want Yo-Chan to start automatically when you log in?" "y";
 Type=Application
 Name=Yo-Chan Assistant
 Comment=Local voice assistant for Linux
-Exec=$PROJECT_DIR/yochan_startup.sh
+Exec="$PROJECT_DIR/yochan_startup.sh"
 X-GNOME-Autostart-enabled=true
 EOF
 
@@ -260,7 +278,7 @@ else
 fi
 
 # =====================================================
-# 10) (NEW) START YO-CHAN & OPEN CONFIGURATOR
+# 10) START YO-CHAN & OPEN CONFIGURATOR
 # =====================================================
 echo ""
 echo "10) Start Yo-Chan now and open the configuration GUI?"
@@ -272,11 +290,14 @@ if ask_yes_no "Do you want to start the listener now and open YoChan Configurato
     ./run_listener.sh &
 
     echo "[INFO] Opening YoChan Configurator (yochan_configurator.py)..."
-    # Keep venv active for this
-    python3 yochan_configurator.py || {
-        echo "WARNING: Failed to open configurator. You can run it later with:"
-        echo "  source $VENV_DIR/bin/activate && python3 yochan_configurator.py"
-    }
+    if [ -f "yochan_configurator.py" ]; then
+        python3 yochan_configurator.py || {
+            echo "WARNING: Failed to open configurator. You can run it later with:"
+            echo "  source $VENV_DIR/bin/activate && python3 yochan_configurator.py"
+        }
+    else
+        echo "WARNING: yochan_configurator.py not found. You can skip this or add it later."
+    fi
 else
     echo "[SKIP] Not starting Yo-Chan or configurator automatically."
 fi
@@ -307,3 +328,4 @@ echo "To open the GUI configurator manually:"
 echo "  source $VENV_DIR/bin/activate"
 echo "  python3 yochan_configurator.py"
 echo ""
+echo "Enjoy Yo-Chan!"
