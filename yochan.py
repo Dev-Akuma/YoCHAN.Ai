@@ -3,7 +3,9 @@ import subprocess
 import re 
 import os
 import sys
-import signal # Required for sending kill signals
+import signal 
+from config import SHUTDOWN_CMD, REBOOT_CMD, SUSPEND_CMD, LOGOUT_CMD
+import difflib
 
 # --- IMPORT MANUAL MAP ---
 from apps import APP_COMMANDS 
@@ -14,11 +16,21 @@ USE_SUDO = True
 TERMINAL_APP = "xfce4-terminal"
 # ----------------------------------
 
-# --- GRACEACEFUL CLEANUP HANDLER (Remains the same) ---
+def _match_app_fuzzy(cleaned_command):
+    if not cleaned_command:
+        return None
+
+    candidates = list(APP_COMMANDS.keys())
+    # find top 1 close match with a decent cutoff
+    matches = difflib.get_close_matches(cleaned_command, candidates, n=1, cutoff=0.7)
+    if matches:
+        return matches[0]
+    return None
+
+
+# --- GRACEFUL CLEANUP HANDLER (Remains the same) ---
 def cleanup_old_listeners():
-    """Finds and terminates any process running the yochan listener script."""
-    
-    # Use pgrep to find all processes matching the script name
+    # ... (function body remains the same) ...
     try:
         pids_output = subprocess.check_output(
             ["pgrep", "-f", "python.*yochan_listener.py"], 
@@ -54,7 +66,7 @@ def show_result(message):
 
 # --- SYSTEM EXECUTION CORE ---
 def run_command(cmd, need_sudo=False):
-    """Executes a system command, blocking until completion (used for power/control/cleanup)."""
+    # ... (function body remains the same) ...
     try:
         if need_sudo and USE_SUDO:
             full_cmd = ["sudo"] + cmd
@@ -75,45 +87,75 @@ def run_command(cmd, need_sudo=False):
 # --- SYSTEM POWER HANDLERS (Unchanged) ---
 def handle_shutdown():
     cleanup_old_listeners()
-    handle_logout()
-    run_command(["systemctl", "poweroff"], need_sudo=True)
+    # Optional: still call logout first if configured
+    if LOGOUT_CMD:
+        handle_logout()
+    if SHUTDOWN_CMD:
+        run_command(SHUTDOWN_CMD, need_sudo=True)
     return "Shutting down system."
 
 def handle_restart():
     cleanup_old_listeners()
-    run_command(["systemctl", "reboot"], need_sudo=True)
+    if REBOOT_CMD:
+        run_command(REBOOT_CMD, need_sudo=True)
     return "Restarting system."
 
 def handle_sleep():
     cleanup_old_listeners()
-    run_command(["systemctl", "suspend"], need_sudo=True)
+    if SUSPEND_CMD:
+        run_command(SUSPEND_CMD, need_sudo=True)
     return "Suspending system."
 
 def handle_logout():
-    run_command(["xfce4-session-logout", "--logout", "--fast"], need_sudo=False)
-    return "Logging out of session."
+    if LOGOUT_CMD:
+        run_command(LOGOUT_CMD, need_sudo=False)
+        return "Logging out of session."
+    else:
+        return "Logout command is not configured for this desktop."
+
 
 # --- APPLICATION HANDLERS ---
 def handle_app_launch(app_name):
     app_executable = APP_COMMANDS.get(app_name)
     
     if app_executable:
-        # 🐛 CRITICAL FIX: Use 'nohup' and '&' to guarantee the application detaches and runs in the background.
-        # This prevents the Python script from blocking while the app is open.
-        
-        # 1. Build the full shell command string
         shell_command = f"nohup {app_executable} > /dev/null 2>&1 &"
         
-        # 2. Execute via the shell, which is required for 'nohup' and '&'
-        success = subprocess.run(shell_command, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            subprocess.Popen(shell_command, shell=True, start_new_session=True, 
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            success = True
+        except Exception:
+            success = False
         
-        # The success check is less reliable with 'shell=True' but Popen handles the immediate detach
-        # The main goal is non-blocking execution.
-        return f"Opening {app_name.title()}."
+        return f"Opening {app_name.title()}." if success else f"Failed to open {app_name.title()}."
     return None
 
+def handle_generic_launch(cleaned_command):
+    """
+    Fallback: try to launch the command directly if it's a valid executable.
+    Example: cleaned_command='gedit' -> run 'gedit' as is.
+    """
+    if not cleaned_command:
+        return None
+
+    # take the first token as the executable (in case the phrase is multi-word)
+    tokens = cleaned_command.split()
+    exe = tokens[0]
+
+    # Small guard: don't accidentally try to run generic words
+    if exe in ("the", "a", "an", "it", "this"):
+        return None
+
+    # Try to run it as a normal command (non-sudo)
+    success = run_command([exe], need_sudo=False)
+    if success:
+        return f"Trying to open {exe}."
+    else:
+        return None
+
+
 def handle_app_closure(command_text):
-    # ... (Closure logic remains the same)
     CLOSE_PHRASES = r'^(close|quit|terminate|end)\s*'
     app_target = re.sub(CLOSE_PHRASES, '', command_text).strip()
 
@@ -143,7 +185,6 @@ def handle_app_closure(command_text):
 
 
 def handle_close_all():
-    # ... (Close all logic remains the same)
     pkill_list = []
     for executable in APP_COMMANDS.values():
         if 'flatpak' in executable:
@@ -182,19 +223,38 @@ def handle_brightness(command_text):
         return f"Setting brightness to {percent} percent."
     return f"Brightness command failed. Specify a percentage between 0 and 100."
 
+# --- NEW: CLIPBOARD HANDLERS ---
+def handle_clipboard_read():
+    """Reads the current content of the clipboard (xclip)."""
+    try:
+        # '-selection clipboard' targets the primary Ctl+C buffer
+        result = subprocess.run(['xclip', '-o', '-selection', 'clipboard'], capture_output=True, text=True, check=True)
+        content = result.stdout.strip()
+        
+        if content:
+            # Display a notification showing the copied content (user confirmation)
+            show_notification("Clipboard Content", content[:50] + "..." if len(content) > 50 else content, icon="edit-copy")
+            return f"Clipboard content shown."
+        else:
+            return "Clipboard is empty."
+    except FileNotFoundError:
+        return "Clipboard function failed: 'xclip' not installed. (sudo apt install xclip)"
+    except Exception:
+        return "Failed to read clipboard content."
+
 # --- MASTER EXECUTION FUNCTION ---
 def execute_command(command_text):
     command_text = command_text.strip().lower()
-    
-    CLEANUP_PATTERN = r'^(open|launch|start|run|the|a|i)\s*' 
+
+    CLEANUP_PATTERN = r"^(open|launch|start|run|the|a|i)\s*"
     CLOSE_PHRASES = ["close", "quit", "exit", "terminate", "end"]
 
     # --- 1. QUIT LISTENER COMMAND ---
     if "die" in command_text or "stop listening" in command_text:
         return "QUIT_LISTENER"
-        
+
     # --- 2. POWER COMMANDS ---
-    if "shut down" in command_text or "turn off" in command_text:
+    if "shutdown" in command_text or "turn off" in command_text:
         return show_result(handle_shutdown())
     elif "restart" in command_text or "reboot" in command_text:
         return show_result(handle_restart())
@@ -204,28 +264,49 @@ def execute_command(command_text):
         return show_result(handle_logout())
 
     # --- 3. CONTROL COMMANDS ---
-    elif "volume" in command_text and any(word in command_text for word in ["set", "turn", "to"]):
+    if "volume" in command_text and any(word in command_text for word in ["set", "turn", "to"]):
         return show_result(handle_volume(command_text))
-    elif "brightness" in command_text and any(word in command_text for word in ["set", "turn", "to"]):
+    if "brightness" in command_text and any(word in command_text for word in ["set", "turn", "to"]):
         return show_result(handle_brightness(command_text))
 
-    # --- 4. CLOSE ALL APPS COMMAND ---
-    elif "close all" in command_text or "kill all" in command_text:
+    # --- 4. CLIPBOARD COMMANDS ---
+    # Example: "show clipboard", "what's in the clipboard"
+    if "clipboard" in command_text and (
+        "show" in command_text
+        or "read" in command_text
+        or "what is" in command_text
+    ):
+        return show_result(handle_clipboard_read())
+
+    # --- 5. CLOSE ALL APPS COMMAND ---
+    if "close all" in command_text or "kill all" in command_text:
         return show_result(handle_close_all())
-        
-    # --- 5. APPLICATION LAUNCH/CLOSE COMMANDS ---
-    
+
+    # --- 6. APPLICATION LAUNCH/CLOSE COMMANDS ---
     if any(phrase in command_text for phrase in CLOSE_PHRASES):
         return show_result(handle_app_closure(command_text))
-        
-    cleaned_command = re.sub(CLEANUP_PATTERN, '', command_text).strip()
-    
+
+    # Strip helper words (open/launch/etc.)
+    cleaned_command = re.sub(CLEANUP_PATTERN, "", command_text).strip()
+
+    # 6a. Exact match in APP_COMMANDS
     if cleaned_command in APP_COMMANDS:
         return show_result(handle_app_launch(cleaned_command))
-        
+
+    # 6b. Substring/inclusion match in APP_COMMANDS
     for app_name_key in APP_COMMANDS.keys():
-        if app_name_key in cleaned_command or cleaned_command in app_name_key: 
+        if app_name_key in cleaned_command or cleaned_command in app_name_key:
             return show_result(handle_app_launch(app_name_key))
+
+    # 6c. Fuzzy fallback on app names
+    fuzzy_key = _match_app_fuzzy(cleaned_command)
+    if fuzzy_key:
+        return show_result(handle_app_launch(fuzzy_key))
+
+    # --- 7. GENERIC EXECUTABLE FALLBACK ---
+    generic_result = handle_generic_launch(cleaned_command)
+    if generic_result:
+        return show_result(generic_result)
 
     # --- DEFAULT RESPONSE ---
     return show_result(f"Sorry, I don't understand '{cleaned_command}' yet.")

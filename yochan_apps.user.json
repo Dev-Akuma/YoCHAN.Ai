@@ -1,0 +1,7 @@
+{
+  "browser": "firefox",
+  "music": "spotify",
+  "editor": "code",
+  "code editor": "code",
+  "yt": "flatpak run com.github.unofficial-youtube-client"
+}

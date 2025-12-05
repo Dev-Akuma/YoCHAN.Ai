@@ -1,3 +1,7 @@
+import os
+import json
+import sys
+
 # --- MANUAL APPLICATION MAPPING (RELIABLE) ---
 # Key = What the user is likely to say (or what Vosk transcribes)
 # Value = The exact Linux executable command
@@ -89,3 +93,41 @@ APP_COMMANDS = {
     'photos': 'pix',
     'sketch': 'com.github.maoschanz.drawing',
 }
+
+# ---------------------------------------
+# NEW: USER OVERRIDE CONFIG LOADER
+# ---------------------------------------
+
+def _load_user_overrides():
+    """
+    Load yochan_apps.user.json from the same directory (if present)
+    and merge into APP_COMMANDS.
+    """
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    user_cfg_path = os.path.join(base_dir, "yochan_apps.user.json")
+
+    if not os.path.exists(user_cfg_path):
+        return  # nothing to do
+
+    try:
+        with open(user_cfg_path, "r", encoding="utf-8") as f:
+            user_map = json.load(f)
+
+        if not isinstance(user_map, dict):
+            print("[Yo-Chan] Warning: yochan_apps.user.json is not a JSON object, ignoring.",
+                  file=sys.stderr)
+            return
+
+        # merge: user overrides > defaults
+        APP_COMMANDS.update(user_map)
+        print(f"[Yo-Chan] Loaded {len(user_map)} user app mappings from yochan_apps.user.json.",
+              file=sys.stderr)
+
+    except json.JSONDecodeError as e:
+        print(f"[Yo-Chan] Error: Invalid JSON in yochan_apps.user.json: {e}", file=sys.stderr)
+    except Exception as e:
+        print(f"[Yo-Chan] Error reading yochan_apps.user.json: {e}", file=sys.stderr)
+
+
+# Run at import time so yochan.py gets the merged dict automatically
+_load_user_overrides()
