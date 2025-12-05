@@ -20,7 +20,11 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, filedialog, ttk
 import webbrowser
-from yochan_update import check_for_updates, apply_updates
+from yochan_update import (
+    check_for_updates,
+    apply_updates,
+    bootstrap_convert_to_git_clone,
+)
 
 # Import project modules to discover paths
 try:
@@ -534,27 +538,45 @@ class EnvConfigFrame(tk.Frame):
     
     def check_updates_from_ui(self):
         """
-        Check for YoChan updates using git and optionally apply them.
+        Check for YoChan updates via git.
 
-        - Does NOT overwrite local changes: if the working tree is dirty,
-          it will refuse to auto-update and show a warning.
+        Cases:
+        - Not a git repo: offer to convert this install into a git-managed clone.
+        - Git repo, up to date: show info.
+        - Git repo, remote ahead & clean: ask to update.
+        - Git repo, remote ahead & dirty: warn and refuse update.
         """
         repo_dir = BASE_DIR
 
-        has_updates, is_dirty, status = check_for_updates(repo_dir)
+        has_updates, is_dirty, status, is_git = check_for_updates(repo_dir)
 
+        # Case 1: not a git repo -> offer to convert
+        if not is_git:
+            # status already explains it's not a git clone
+            if not messagebox.askyesno(
+                "YoChan Updates",
+                status + "\n\nDo you want to convert this install into a git-managed clone now?"
+            ):
+                return
+
+            ok, msg = bootstrap_convert_to_git_clone(repo_dir)
+            if ok:
+                messagebox.showinfo("YoChan Updates", msg)
+            else:
+                messagebox.showerror("YoChan Updates", msg)
+            return
+
+        # Case 2: git repo, no updates
         if not has_updates:
-            # No new commits, just show info (still mention dirty if any).
             messagebox.showinfo("YoChan Updates", status)
             return
 
-        # There ARE updates
+        # Case 3: updates available but local changes exist
         if is_dirty:
-            # Warn and abort auto-update
             messagebox.showwarning("YoChan Updates", status)
             return
 
-        # Clean and remote is ahead: ask user for confirmation
+        # Case 4: updates available, repo clean -> confirm update
         if not messagebox.askyesno(
             "YoChan Updates",
             status + "\n\nDo you want to update now?"
@@ -566,7 +588,6 @@ class EnvConfigFrame(tk.Frame):
             messagebox.showinfo("YoChan Updates", msg)
         else:
             messagebox.showerror("YoChan Updates", msg)
-
 
     # ---------- MODELS / WAKE WORD TAB ----------
 
@@ -748,7 +769,6 @@ class EnvConfigFrame(tk.Frame):
         messagebox.showinfo("Saved", "Model / wake word / assistant settings saved to .env.")
 
     # ---------- SYSTEM / TIMING TAB ----------
-
     def _build_system_tab(self):
         f = self.system_frame
 
@@ -796,6 +816,7 @@ class EnvConfigFrame(tk.Frame):
         self.logout_entry.grid(row=row, column=0, sticky="we", pady=(0, 5))
         row += 1
 
+        # --- Updates button (single frame) ---
         updates_frame = tk.Frame(f)
         updates_frame.grid(row=row, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
@@ -804,7 +825,7 @@ class EnvConfigFrame(tk.Frame):
             text="Check for YoChan updates",
             command=self.check_updates_from_ui,
         ).grid(row=0, column=0, padx=(0, 8))
-        
+
         row += 1
 
         # Buttons
@@ -817,6 +838,7 @@ class EnvConfigFrame(tk.Frame):
 
         # Fill current values
         self.reload_system_from_env()
+
 
     def reload_system_from_env(self):
         self.env_values = read_env_file(ENV_PATH)

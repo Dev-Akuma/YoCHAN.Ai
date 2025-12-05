@@ -1,0 +1,6 @@
+pvporcupine
+pvrecorder
+vosk
+python-dotenv
+numpy
+sounddevice

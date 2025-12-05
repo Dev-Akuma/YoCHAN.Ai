@@ -61,11 +61,18 @@ Important files:
 - `config.py`  
   Central configuration module. Loads `.env`, auto-detects models when possible, and exposes power/logout commands.
 
-- `yochan_configurator.py`  
-  Small Tk GUI to view/edit `yochan_apps.user.json` visually.
-
 - `config.template.env`  
   Template for your `.env` file.
+
+- `yochan_configurator.py`  
+  Tk-based GUI to manage:
+  - app mappings (`yochan_apps.user.json`)  
+  - core `.env` values (models, wake word, assistant name, power commands, fuzzy threshold, etc.)
+
+- `yochan_update.py`  
+  Git-aware updater:
+  - checks for updates if this is a git clone  
+  - can convert a ZIP/non-git folder into a proper git clone while preserving `.env` and `yochan_apps.user.json`.
 
 - `setup.sh`  
   Installs dependencies, sets up virtualenv, downloads a default Vosk model.
@@ -73,19 +80,16 @@ Important files:
 - `run_listener.sh`  
   Helper script to activate venv and start `yochan_listener.py`.
 
+- `yochan_startup.sh`  
+  Script for starting Yo-Chan on login (via DE autostart or systemd user services).
+
 ---
 
-## 🛠️ Installation (Linux Mint / Ubuntu / similar)
+## 📦 Dependencies
 
-### 1. Prerequisites
+### Python packages
 
-- Python 3.8+  
-- `git`  
-- A working microphone  
-- Basic desktop with PulseAudio / PipeWire
-
-### 2. Clone the repository
+These are installed automatically by `setup.sh`, but if you prefer manual:
 
 ```bash
-git clone <YOUR_GITHUB_URL> yochan-assistant
-cd yochan-assistant
+pip install pvporcupine pvrecorder vosk python-dotenv numpy sounddevice

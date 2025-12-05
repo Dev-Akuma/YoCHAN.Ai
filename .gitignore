@@ -3,4 +3,44 @@
 /vosk-model-small-en-us-0.15
 /Yo-Chan_en_linux_v3_0_0
 /yochan_startup.log
-/yochan_apps.user.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual env
+.venv/
+venv/
+
+# Editor / OS clutter
+*.swp
+*.swo
+*.log
+.DS_Store
+.idea/
+.vscode/
+
+# User-specific config
+.env
+yochan_apps.user.json
+
+# Models and large assets
+models/
+model/
+vosk_models/
+porcupine_models/
+*.ppn
+*.onnx
+*.bin
+*.zip
+
+# Backups from updater
+*_backup_*/
+*_backup_*.zip
+
+# Misc
+dist/
+build/
