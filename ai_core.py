@@ -2,11 +2,29 @@
 from __future__ import annotations
 
 import re
+import shlex
 from typing import TypedDict, Optional, Literal
 
 from state import AssistantState
 from apps import APP_COMMANDS
-from yochan import execute_command
+
+# --- NEW IMPORTS: Direct Intent Execution ---
+from handlers import (
+    handle_app_launch,
+    handle_app_closure,
+    handle_close_all,
+    handle_volume,
+    handle_brightness,
+    handle_clipboard_read,
+    handle_screenshot,
+    handle_set_timer,
+    handle_set_alarm,
+    execute_command,
+    run_command,
+    show_notification,
+    list_configured_apps,
+)
+# -------------------------------------------
 
 
 # ==========================
@@ -19,6 +37,9 @@ class Intent(TypedDict, total=False):
     app: Optional[str]
     value: Optional[int]     # numeric value (e.g. 50 for brightness)
     delta: Optional[int]     # relative change
+    # --- NEW: for time-based commands ---
+    time_str: Optional[str]  # e.g. "10 minutes", "7 30 a m"
+    duration_s: Optional[int] # duration in seconds
 
 
 STATE = AssistantState()  # single global state instance for now
@@ -30,7 +51,7 @@ STATE = AssistantState()  # single global state instance for now
 
 FILLER_PHRASES = [
     "yochan", "yo chan",
-    "please", "can you", "could you",
+    "please", "can you",
     "will you", "would you",
     "uh", "umm", "um",
     "kind of", "sort of",
@@ -60,18 +81,15 @@ def _match_app_in_text(text: str) -> Optional[str]:
     """
     Try to match one of the APP_COMMANDS keys inside the text.
     Offline, simple approach: substring scanning, biased towards longer names.
-
-    Example:
-      APP_COMMANDS: "vs code", "code"
-      Text: "open vs code"
-      -> "vs code"
     """
     if not text:
         return None
 
+    # Bias towards longer names for specificity
     candidates = sorted(APP_COMMANDS.keys(), key=len, reverse=True)
     for name in candidates:
         name_low = name.lower()
+        # Simple substring check (can be improved with fuzzy/tokenizing later)
         if name_low in text:
             return name  # return canonical key as defined in APP_COMMANDS
     return None
@@ -87,6 +105,53 @@ def _extract_number(text: str) -> Optional[int]:
     if m:
         return int(m.group(1))
     return None
+
+
+def _extract_time_duration(text: str) -> tuple[Optional[str], Optional[int]]:
+    """
+    Extracts time strings (e.g., '10 minutes', '3 hours') and converts to seconds.
+    Returns (raw_time_str, duration_in_seconds)
+    """
+    time_units = {
+        "second": 1,
+        "seconds": 1,
+        "minute": 60,
+        "minutes": 60,
+        "hour": 3600,
+        "hours": 3600,
+    }
+
+    # Regex 1: Capture (number) (unit) for duration/timer
+    m = re.search(r"(\d+)\s*(second|seconds|minute|minutes|hour|hours)", text)
+    if m:
+        number = int(m.group(1))
+        unit = m.group(2)
+        seconds = number * time_units[unit]
+        return m.group(0), seconds
+
+    # Regex 2: Capture (hour) (minute, optional) (am/pm) for alarms
+    m_alarm = re.search(r"(\d+)(\s*(\d+))?\s*(a\.?m\.?|p\.?m\.?)", text)
+    if m_alarm:
+        # Cannot calculate duration in seconds without knowing current time, so return raw string
+        return m_alarm.group(0), None
+
+    return None, None
+
+
+def _exec_raw_command(cmd_text: str) -> str:
+    """
+    Safe wrapper that converts a raw string into tokens and calls handlers.execute_command.
+    This keeps the rest of the code able to pass simple strings.
+    """
+    if not cmd_text:
+        return "No command provided."
+    try:
+        tokens = shlex.split(cmd_text)
+    except Exception:
+        # fallback: simple whitespace split
+        tokens = cmd_text.split()
+    # handlers.execute_command expects a list of tokens
+    return execute_command(tokens)
 
 
 # ==========================
@@ -152,7 +217,9 @@ def detect_intent_offline(text: str, state: AssistantState) -> Intent:
 
     # --- BRIGHTNESS --------------------------------------
 
-    if "brightness" in text:
+    # Ensure single words like 'brighter' or 'darker' trigger intent detection
+    if "brightness" in text or "brighter" in text or "darker" in text:
+
         # absolute: "set brightness to 50"
         if "set" in text and "to" in text:
             value = _extract_number(text)
@@ -203,7 +270,8 @@ def detect_intent_offline(text: str, state: AssistantState) -> Intent:
 
     # --- VOLUME ------------------------------------------
 
-    if "volume" in text or "sound" in text:
+    # Ensure single words like 'louder' or 'quieter' trigger intent detection
+    if "volume" in text or "sound" in text or "louder" in text or "quieter" in text:
         if "mute" in text:
             return {
                 "type": "set_volume",
@@ -257,22 +325,39 @@ def detect_intent_offline(text: str, state: AssistantState) -> Intent:
                 "raw": text,
             }
 
-    # --- POWER COMMAND HINTS (still go through execute_command) ----
+    # --- CLIPBOARD COMMAND HINT ---
+    if "clipboard" in text and ("show" in text or "read" in text or "what is" in text):
+        return {"type": "clipboard_read", "raw": text}
 
-    if any(word in text for word in ["shutdown", "shut down", "turn off", "power off"]):
-        return {"type": "raw_command", "raw": "shutdown"}
+    # --- SCREENSHOT --------------------------------------
+    if any(word in text for word in ["screenshot", "capture screen", "print screen", "take a picture"]):
+        return {
+            "type": "take_screenshot",
+            "raw": text,
+        }
 
-    if any(word in text for word in ["restart", "reboot"]):
-        return {"type": "raw_command", "raw": "restart"}
+    # --- TIMERS & ALARMS ---------------------------------
+    time_str, duration_s = _extract_time_duration(text)
 
-    if any(word in text for word in ["sleep", "suspend"]):
-        return {"type": "raw_command", "raw": "sleep"}
+    if "set a timer" in text or "start a timer" in text or "timer for" in text:
+        if duration_s is not None:
+            return {
+                "type": "set_timer",
+                "time_str": time_str,
+                "duration_s": duration_s,
+                "raw": text,
+            }
 
-    if any(word in text for word in ["logout", "log out", "log off"]):
-        return {"type": "raw_command", "raw": "logout"}
+    if "set an alarm" in text or "alarm for" in text:
+        # Note: alarms rely on external tools and exact time extraction is tricky
+        if time_str is not None:
+            return {
+                "type": "set_alarm",
+                "time_str": time_str,
+                "raw": text,
+            }
 
-    # --- FALLBACK: raw command, let existing yochan handle it -------
-
+    # --- FALLBACK: raw command, let existing handlers handle it (including power) -------
     return intent
 
 
@@ -291,24 +376,20 @@ def execute_intent(intent: Intent, state: AssistantState) -> str:
 
     if itype == "open_app" and intent.get("app"):
         app = intent["app"]
-        # let yochan's existing logic handle: "open <app>"
-        cmd_text = f"open {app}"
-        res = execute_command(cmd_text)
+        res = handle_app_launch(app)  # DIRECT EXECUTION
         state.last_action = "open_app"
         state.last_app = app
         return res
 
     if itype == "close_app" and intent.get("app"):
         app = intent["app"]
-        cmd_text = f"close {app}"
-        res = execute_command(cmd_text)
+        res = handle_app_closure(app)  # DIRECT EXECUTION
         state.last_action = "close_app"
         state.last_app = app
         return res
 
     if itype == "close_all":
-        cmd_text = "close all"
-        res = execute_command(cmd_text)
+        res = handle_close_all()  # DIRECT EXECUTION
         state.last_action = "close_all"
         return res
 
@@ -316,22 +397,15 @@ def execute_intent(intent: Intent, state: AssistantState) -> str:
 
     if itype == "set_brightness" and intent.get("value") is not None:
         value = max(0, min(100, intent["value"]))  # clamp to 0–100
-        # You may need to adapt this phrase to match your current handler
-        cmd_text = f"set brightness {value}"
-        res = execute_command(cmd_text)
+        res = handle_brightness(absolute=value)  # DIRECT EXECUTION
         state.last_action = "set_brightness"
         state.last_brightness_change = 0
         return res
 
     if itype == "change_brightness" and intent.get("delta") is not None:
         delta = intent["delta"]
-        # Adapt to your format, e.g. "brightness up 10" / "brightness down 10"
-        if delta > 0:
-            cmd_text = f"brightness up {delta}"
-        else:
-            cmd_text = f"brightness down {abs(delta)}"
-
-        res = execute_command(cmd_text)
+        # handlers.handle_brightness accepts a relative integer (positive increases, negative decreases)
+        res = handle_brightness(relative=delta)  # DIRECT EXECUTION
         state.last_action = "change_brightness"
         state.last_brightness_change = delta
         return res
@@ -340,31 +414,53 @@ def execute_intent(intent: Intent, state: AssistantState) -> str:
 
     if itype == "set_volume" and intent.get("value") is not None:
         value = max(0, min(100, intent["value"]))
-        cmd_text = f"set volume {value}"
-        res = execute_command(cmd_text)
+        res = handle_volume(absolute=value)  # DIRECT EXECUTION
         state.last_action = "set_volume"
         state.last_volume_change = 0
         return res
 
     if itype == "change_volume" and intent.get("delta") is not None:
         delta = intent["delta"]
-        if delta > 0:
-            cmd_text = f"volume up {delta}"
-        else:
-            cmd_text = f"volume down {abs(delta)}"
-
-        res = execute_command(cmd_text)
+        res = handle_volume(relative=delta)  # DIRECT EXECUTION
         state.last_action = "change_volume"
         state.last_volume_change = delta
         return res
 
-    # --- default: raw command -----------------------------
+    # --- clipboard ----------------------------------------
+
+    if itype == "clipboard_read":
+        res = handle_clipboard_read()  # DIRECT EXECUTION
+        state.last_action = "clipboard_read"
+        return res
+
+    # --- screenshot ---------------------------------------
+
+    if itype == "take_screenshot":
+        res = handle_screenshot()  # DIRECT EXECUTION
+        state.last_action = "take_screenshot"
+        return res
+
+    # --- timers & alarms ----------------------------------
+
+    if itype == "set_timer" and intent.get("duration_s") is not None:
+        duration = intent["duration_s"]
+        res = handle_set_timer(duration)  # DIRECT EXECUTION
+        state.last_action = "set_timer"
+        return res
+
+    if itype == "set_alarm" and intent.get("time_str") is not None:
+        time_str = intent["time_str"]
+        res = handle_set_alarm(time_str)  # DIRECT EXECUTION
+        state.last_action = "set_alarm"
+        return res
+
+    # --- default: raw command (includes power commands) ---
 
     if itype == "raw_command":
         cmd_text = raw
-        res = execute_command(cmd_text)
+        # Forward raw string to handlers.execute_command safely
+        res = _exec_raw_command(cmd_text)
         state.last_action = "raw_command"
-        # you *could* infer last_app from res if you ever return structured info
         return res
 
     # --- empty / unknown ----------------------------------

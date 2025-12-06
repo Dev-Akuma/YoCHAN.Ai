@@ -1,10 +1,21 @@
 #!/usr/bin/env python3
-import subprocess
-import re 
+"""
+yochan.py - top-level command routing and fallback handlers.
+
+This module routes text commands to OS-level handlers. It delegates
+subprocess, notification and app management to handlers.py for safety and
+testability.
+"""
+
+import re
 import os
 import sys
-import signal 
-import difflib # For fuzzy matching
+import signal
+import difflib
+import shlex
+import shutil
+import subprocess
+from typing import Optional
 
 # --- IMPORT CONFIGURATION ---
 from config import (
@@ -16,290 +27,287 @@ from config import (
     ASSISTANT_NAME,
     ASSISTANT_DISPLAY_NAME,
 )
-
-from apps import APP_COMMANDS 
+from apps import APP_COMMANDS
 # ----------------------------
+
+# Import shared handlers (centralized, safer implementations)
+from handlers import (
+    show_notification,
+    run_command,               # returns (rc, stdout, stderr)
+    handle_app_launch as _handler_app_launch,
+    handle_app_closure as _handler_app_closure,
+    handle_close_all as _handler_close_all,
+    handle_volume as _handler_volume,           # (relative=None, absolute=None)
+    handle_brightness as _handler_brightness,   # (relative=None, absolute=None)
+    handle_clipboard_read as _handler_clipboard_read,
+    handle_screenshot as _handler_screenshot,
+    handle_set_timer as _handler_set_timer,
+    handle_set_alarm as _handler_set_alarm,
+)
 
 # ------------- CONFIG -------------
 USE_SUDO = True
 TERMINAL_APP = "xfce4-terminal"
 # ----------------------------------
 
+
 # --- FUZZY MATCHING HELPER ---
-def _match_app_fuzzy(cleaned_command):
+def _match_app_fuzzy(cleaned_command: str) -> Optional[str]:
     if not cleaned_command:
         return None
-
     candidates = list(APP_COMMANDS.keys())
-    # Find top 1 close match, using the configurable FUZZY_THRESHOLD
     matches = difflib.get_close_matches(cleaned_command, candidates, n=1, cutoff=FUZZY_THRESHOLD)
     if matches:
         return matches[0]
     return None
 
 
-# --- GRACEFUL CLEANUP HANDLER (Remains the same) ---
-def cleanup_old_listeners():
-    """Finds and terminates any process running the yochan listener script."""
-    
+# --- GRACEFUL CLEANUP HANDLER ---
+def cleanup_old_listeners() -> None:
+    """Finds and terminates any running yochan listener processes (best-effort)."""
     try:
         pids_output = subprocess.check_output(
-            ["pgrep", "-f", "python.*yochan_listener.py"], 
-            text=True
-        ).strip().split('\n')
-        
+            ["pgrep", "-f", "python.*yochan_listener.py"],
+            text=True,
+        ).strip().splitlines()
         pids = [int(p) for p in pids_output if p.isdigit() and int(p) != os.getpid()]
-        
         for pid in pids:
             try:
                 os.kill(pid, signal.SIGTERM)
             except ProcessLookupError:
                 continue
-                
     except subprocess.CalledProcessError:
+        # pgrep returned non-zero -> no processes found
         pass
+    except Exception as e:
+        print(f"[{ASSISTANT_NAME}] cleanup_old_listeners error: {e}", file=sys.stderr)
+
 
 # --- DISPLAY HANDLER (Notifications) ---
-def show_notification(title, message, icon="terminal"):
+def show_result(message: str) -> str:
+    """
+    Show a desktop notification and print to stderr. Return the same message.
+    """
     try:
-        subprocess.run(
-            ["notify-send", "-t", "3000", "-i", icon, title, message],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except FileNotFoundError:
-        print(f"[{ASSISTANT_NAME}] Notification Failed: {title} - {message}", file=sys.stderr)
-    except Exception as e:
-        print(f"[{ASSISTANT_NAME}] Notification Error: {e}", file=sys.stderr)
-
-
-def show_result(message):
-    show_notification(ASSISTANT_DISPLAY_NAME, message)
+        show_notification(ASSISTANT_DISPLAY_NAME, message)
+    except Exception:
+        print(f"[{ASSISTANT_NAME}] {message}", file=sys.stderr)
     print(f"\n[{ASSISTANT_NAME}]: {message}", file=sys.stderr)
     return message
 
 
-
-# --- SYSTEM EXECUTION CORE ---
-def run_command(cmd, need_sudo=False):
-    """Executes a system command, blocking until completion (used for power/control/cleanup)."""
-    try:
-        if need_sudo and USE_SUDO:
-            full_cmd = ["sudo"] + cmd
-        else:
-            full_cmd = cmd
-
-        subprocess.run(full_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"[{ASSISTANT_NAME}] Execution Error: Command '{' '.join(full_cmd)}' failed. Details: {e}", file=sys.stderr)
-        return False
-    except FileNotFoundError:
-        print(f"[{ASSISTANT_NAME}] Error: Executable '{cmd[0]}' not found. Check your map or installation.", file=sys.stderr)
-        return False
-    except KeyboardInterrupt:
-        return False
-
 # --- SYSTEM POWER HANDLERS ---
-def handle_shutdown():
+def handle_shutdown() -> str:
     cleanup_old_listeners()
+    # run_command expects token lists; convert if caller gave a string command
     if LOGOUT_CMD:
-        run_command(LOGOUT_CMD, need_sudo=False)
+        run_command(shlex.split(LOGOUT_CMD), check=False)
     if SHUTDOWN_CMD:
-        run_command(SHUTDOWN_CMD, need_sudo=True)
+        run_command(shlex.split(SHUTDOWN_CMD), check=False)
     return "Shutting down system."
 
-def handle_restart():
+
+def handle_restart() -> str:
     cleanup_old_listeners()
     if REBOOT_CMD:
-        run_command(REBOOT_CMD, need_sudo=True)
+        run_command(shlex.split(REBOOT_CMD), check=False)
     return "Restarting system."
 
-def handle_sleep():
+
+def handle_sleep() -> str:
     cleanup_old_listeners()
     if SUSPEND_CMD:
-        run_command(SUSPEND_CMD, need_sudo=True)
+        run_command(shlex.split(SUSPEND_CMD), check=False)
     return "Suspending system."
 
-def handle_logout():
+
+def handle_logout() -> str:
     if LOGOUT_CMD:
-        run_command(LOGOUT_CMD, need_sudo=False)
+        run_command(shlex.split(LOGOUT_CMD), check=False)
         return "Logging out of session."
     else:
         return "Logout command is not configured for this desktop."
 
-# --- APPLICATION HANDLERS ---
-def handle_app_launch(app_name):
-    app_executable = APP_COMMANDS.get(app_name)
-    
-    if app_executable:
-        shell_command = f"nohup {app_executable} > /dev/null 2>&1 &"
-        
-        try:
-            subprocess.Popen(shell_command, shell=True, start_new_session=True, 
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            success = True
-        except Exception:
-            success = False
-        
-        return f"Opening {app_name.title()}." if success else f"Failed to open {app_name.title()}."
-    return None
 
-def handle_generic_launch(cleaned_command):
+# --- APPLICATION / GENERIC LAUNCHERS ---
+def handle_app_launch(app_name: str) -> str:
+    """
+    Wrapper that calls handlers.handle_app_launch. Accepts either canonical app key
+    from APP_COMMANDS or user-provided name that maps to APP_COMMANDS entries.
+    """
+    if not app_name:
+        return "No application specified."
+
+    # Exact key or fuzzy match
+    key = app_name if app_name in APP_COMMANDS else (_match_app_fuzzy(app_name) or app_name)
+    return _handler_app_launch(key)
+
+
+def handle_generic_launch(cleaned_command: str) -> Optional[str]:
+    """
+    Try to execute an arbitrary executable from cleaned_command (best-effort).
+    Avoids shell=True for safety.
+    """
     if not cleaned_command:
         return None
-    tokens = cleaned_command.split()
-    exe = tokens[0]
+    try:
+        tokens = shlex.split(cleaned_command)
+    except Exception:
+        tokens = cleaned_command.split()
+    if not tokens:
+        return None
 
+    exe = tokens[0].lower()
     if exe in ("the", "a", "an", "it", "this"):
         return None
 
-    success = run_command([exe], need_sudo=False)
-    if success:
+    try:
+        subprocess.Popen(tokens, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         return f"Trying to open {exe}."
-    else:
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        print(f"[{ASSISTANT_NAME}] generic launch failed: {e}", file=sys.stderr)
         return None
 
-def handle_app_closure(command_text):
+
+def handle_app_closure(command_text: str) -> str:
+    """
+    Attempt to close an application using the canonical mapping in APP_COMMANDS.
+    Delegates to handlers' closure helper if available.
+    """
     CLOSE_PHRASES = r'^(close|quit|terminate|end)\s*'
     app_target = re.sub(CLOSE_PHRASES, '', command_text).strip()
 
-    executable = None
     app_name = None
-    
     if app_target in APP_COMMANDS:
         app_name = app_target
-        executable = APP_COMMANDS[app_name]
     else:
-        for key, exec_cmd in APP_COMMANDS.items():
-            if app_target in key:
+        for key in APP_COMMANDS.keys():
+            if app_target in key or key in app_target:
                 app_name = key
-                executable = exec_cmd
                 break
-                
-    if executable:
-        base_executable = executable.split()[-1] if 'flatpak' in executable else executable.split()[0]
-        success = run_command(["pkill", "-f", base_executable], need_sudo=False)
-        
-        if success:
-            return f"Closing {app_name.title()}."
-        else:
-            return f"Could not find or close {app_name.title()}. It may not be running."
-            
+
+    if app_name:
+        return _handler_app_closure(app_name)
+
     return "Error: Application name was not recognized for closure."
 
 
-def handle_close_all():
-    pkill_list = []
+def handle_close_all() -> str:
+    return _handler_close_all()
 
-    for executable in APP_COMMANDS.values():
-        # For flatpak apps, actual running process is the last token
-        if "flatpak" in executable:
-            pkill_list.append(executable.split()[-1])
-        else:
-            pkill_list.append(executable.split()[0])
 
-    unique_executables = list(set(pkill_list))
-
-    # Kill each executable one by one (safer than packing into a single pkill)
-    for exe in unique_executables:
-        subprocess.run(
-            ["pkill", "-f", exe],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-    return "Closed all recognized user applications."
-
-# --- VOLUME/BRIGHTNESS HANDLERS (Unchanged) ---
-def _get_percentage(command_text):
-    percentage_str = re.search(r'\d+', command_text)
-    if percentage_str:
-        percent = int(percentage_str.group(0))
-        return min(100, max(0, percent)) 
+# --- VOLUME/BRIGHTNESS HANDLER WRAPPERS (avoid name collision with imports) ---
+def _get_percentage(command_text: str) -> Optional[int]:
+    m = re.search(r'\d+', command_text)
+    if m:
+        percent = int(m.group(0))
+        return min(100, max(0, percent))
     return None
 
-# NEW: relative volume handler
-def handle_volume_relative(command_text, direction: str):
-    """
-    Adjust volume by a relative step using amixer.
-    direction: "up" or "down"
-    """
-    step = _get_percentage(command_text) or 5
-    op = "+" if direction == "up" else "-"
-    run_command(
-        ["amixer", "-D", "pulse", "sset", "Master", f"{step}%{op}"],
-        need_sudo=False,
-    )
-    if direction == "up":
-        return f"Increasing volume by {step} percent."
-    else:
-        return f"Decreasing volume by {step} percent."
 
-# NEW: relative brightness handler
-def handle_brightness_relative(command_text, direction: str):
+def volume_cmd(command_text: str) -> str:
     """
-    Adjust brightness by a relative step using xbacklight.
-    direction: "up" or "down"
+    Top-level wrapper for volume commands. Calls handler or uses relative/absolute modes.
     """
-    step = _get_percentage(command_text) or 10
+    percent = _get_percentage(command_text)
+    if percent is not None and any(word in command_text for word in ["set", "to"]):
+        # absolute set
+        return _handler_volume(absolute=percent)
+    if any(word in command_text for word in ["up", "increase", "raise", "louder"]):
+        step = percent or 5
+        return _handler_volume(relative=step)
+    if any(word in command_text for word in ["down", "decrease", "lower", "quieter"]):
+        step = percent or 5
+        return _handler_volume(relative=-step)
+    return "Volume command failed. Specify a percentage (e.g., 'set volume to 50') or say 'increase volume'."
 
-    # Ensure xbacklight exists
-    if subprocess.getstatusoutput("which xbacklight")[0] != 0:
+
+def brightness_cmd(command_text: str) -> str:
+    """
+    Top-level wrapper for brightness commands.
+    """
+    percent = _get_percentage(command_text)
+    if percent is not None and any(word in command_text for word in ["set", "to"]):
+        return _handler_brightness(absolute=percent)
+    if any(word in command_text for word in ["up", "increase", "raise", "brighter"]):
+        step = percent or 10
+        return _handler_brightness(relative=step)
+    if any(word in command_text for word in ["down", "decrease", "lower", "darker", "dim"]):
+        step = percent or 10
+        return _handler_brightness(relative=-step)
+    return "Brightness command failed. Specify a percentage or say 'increase brightness'."
+
+
+# --- CLIPBOARD / SCREENSHOT / TIMER WRAPPERS (avoid name collisions) ---
+def clipboard_read_cmd() -> str:
+    try:
+        return _handler_clipboard_read()
+    except Exception:
+        # fallback to xclip
+        try:
+            result = subprocess.run(['xclip', '-o', '-selection', 'clipboard'], capture_output=True, text=True, check=True)
+            content = result.stdout.strip()
+            if content:
+                show_notification("Clipboard Content", content[:50] + ("..." if len(content) > 50 else ""))
+                return "Clipboard content shown."
+            else:
+                return "Clipboard is empty."
+        except Exception:
+            return "Failed to read clipboard content."
+
+
+def screenshot_cmd() -> str:
+    try:
+        out = _handler_screenshot()
+        # handlers returns path or error string; show notification if path returned
+        if isinstance(out, str) and out.endswith(".png"):
+            show_notification("Screenshot", f"Saved to {out}")
+            return f"Screenshot saved: {out}"
+        return out
+    except Exception as e:
+        return f"Screenshot failed: {e}"
+
+
+def set_timer_cmd(duration_s: int, time_str: Optional[str]) -> str:
+    try:
+        return _handler_set_timer(duration_s)
+    except Exception:
+        # fallback: background sleep + notify
+        try:
+            notify = shutil.which("notify-send") or "notify-send"
+            shell_command = f"nohup sh -c 'sleep {int(duration_s)} && {notify} \"⏰ YoChan Timer\" \"Time is up!\"' >/dev/null 2>&1 &"
+            subprocess.Popen(shell_command, shell=True, start_new_session=True)
+            return f"Timer started for {time_str or f'{duration_s} seconds'}."
+        except Exception:
+            return "Failed to set timer."
+
+
+def set_alarm_cmd(time_str: str) -> str:
+    try:
+        return _handler_set_alarm(time_str)
+    except Exception:
+        # best-effort: open clock apps as hint
+        handle_generic_launch("gnome-clocks")
+        handle_generic_launch("xfce4-datetime-settings")
         return (
-            f"[{ASSISTANT_NAME}]: Brightness control requires 'xbacklight' "
-            "(install using: sudo apt install xbacklight)."
+            f"I heard you want an alarm for {time_str}. "
+            "Please use your desktop clock application for reliable scheduling."
         )
 
-    if direction == "up":
-        run_command(["xbacklight", "-inc", str(step)], need_sudo=False)
-        return f"Increasing brightness by {step} percent."
-    else:
-        run_command(["xbacklight", "-dec", str(step)], need_sudo=False)
-        return f"Decreasing brightness by {step} percent."
-
-def handle_volume(command_text):
-    percent = _get_percentage(command_text)
-    if percent is not None:
-        run_command(["amixer", "-D", "pulse", "sset", "Master", f"{percent}%"], need_sudo=False)
-        return f"Setting volume to {percent} percent."
-    return f"Volume command failed. Specify a percentage (e.g., 50)."
-
-def handle_brightness(command_text):
-    percent = _get_percentage(command_text)
-    if percent is not None:
-        if subprocess.getstatusoutput("which xbacklight")[0] != 0:
-            return (
-                f"[{ASSISTANT_NAME}]: Brightness control requires 'xbacklight' "
-                "(install using: sudo apt install xbacklight)."
-            )
-
-        run_command(["xbacklight", "-set", str(percent)], need_sudo=False)
-        return f"Setting brightness to {percent} percent."
-    return f"Brightness command failed. Specify a percentage between 0 and 100."
-
-# --- CLIPBOARD HANDLERS (Unchanged) ---
-def handle_clipboard_read():
-    """Reads the current content of the clipboard (xclip)."""
-    try:
-        result = subprocess.run(['xclip', '-o', '-selection', 'clipboard'], capture_output=True, text=True, check=True)
-        content = result.stdout.strip()
-        
-        if content:
-            show_notification("Clipboard Content", content[:50] + "..." if len(content) > 50 else content, icon="edit-copy")
-            return f"Clipboard content shown."
-        else:
-            return "Clipboard is empty."
-    except FileNotFoundError:
-        return "Clipboard function failed: 'xclip' not installed. (sudo apt install xclip)"
-    except Exception:
-        return "Failed to read clipboard content."
 
 # --- MASTER EXECUTION FUNCTION ---
-def execute_command(command_text):
-    command_text = command_text.strip().lower()
-    
+def execute_command(command_text: str) -> str:
+    """
+    Top-level routing for command text. Returns user-facing message.
+    """
+    if not command_text:
+        return show_result("No command provided.")
+
+    original = command_text.strip().lower()
+    command_text = original
+
     CLEANUP_PATTERN = r"^(open|launch|start|run|the|a|i)\s*"
     CLOSE_PHRASES = ["close", "quit", "exit", "terminate", "end"]
 
@@ -318,46 +326,21 @@ def execute_command(command_text):
         return show_result(handle_logout())
 
     # --- 3. CONTROL COMMANDS ---
+    if "volume" in command_text:
+        return show_result(volume_cmd(command_text))
 
-    # 3a. RELATIVE VOLUME: "volume up 5", "turn it up a bit", etc.
-    if "volume" in command_text and any(
-        word in command_text for word in ["up", "increase", "raise"]
-    ):
-        return show_result(handle_volume_relative(command_text, direction="up"))
-
-    if "volume" in command_text and any(
-        word in command_text for word in ["down", "decrease", "lower"]
-    ):
-        return show_result(handle_volume_relative(command_text, direction="down"))
-
-    # 3b. RELATIVE BRIGHTNESS: "bit brighter", "brightness down 10", etc.
-    if "brightness" in command_text and any(
-        word in command_text for word in ["up", "increase", "raise", "brighter"]
-    ):
-        return show_result(handle_brightness_relative(command_text, direction="up"))
-
-    if "brightness" in command_text and any(
-        word in command_text for word in ["down", "decrease", "lower", "darker", "dim"]
-    ):
-        return show_result(handle_brightness_relative(command_text, direction="down"))
-
-    # 3c. ABSOLUTE VOLUME / BRIGHTNESS
-    if "volume" in command_text and any(word in command_text for word in ["set", "turn", "to"]):
-        return show_result(handle_volume(command_text))
-
-    if "brightness" in command_text and any(word in command_text for word in ["set", "turn", "to"]):
-        return show_result(handle_brightness(command_text))
+    if "brightness" in command_text:
+        return show_result(brightness_cmd(command_text))
 
     # --- 4. CLIPBOARD COMMANDS ---
     if "clipboard" in command_text and ("show" in command_text or "read" in command_text or "what is" in command_text):
-        return show_result(handle_clipboard_read())
+        return show_result(clipboard_read_cmd())
 
     # --- 5. CLOSE ALL APPS COMMAND ---
     if "close all" in command_text or "kill all" in command_text:
         return show_result(handle_close_all())
 
-    # --- 6. APPLICATION LAUNCH/CLOSE COMMANDS ---
-    
+    # --- 6. APPLICATION LAUNCH/CLOSE COMMANDS (Fallback Logic) ---
     if any(phrase in command_text for phrase in CLOSE_PHRASES):
         return show_result(handle_app_closure(command_text))
 
@@ -378,9 +361,20 @@ def execute_command(command_text):
         return show_result(handle_app_launch(fuzzy_key))
 
     # --- 7. GENERIC EXECUTABLE FALLBACK ---
+    if any(w in command_text for w in ["brightness", "volume", "sleep", "shutdown", "reboot", "logout", "die"]):
+        return show_result("Control command failed during execution. Check terminal logs for detailed error.")
+
     generic_result = handle_generic_launch(cleaned_command)
     if generic_result:
         return show_result(generic_result)
 
-    # --- DEFAULT RESPONSE ---
+    # --- Alarm hint fallback ---
+    if "alarm" in command_text:
+        handle_generic_launch("gnome-clocks")
+        handle_generic_launch("xfce4-datetime-settings")
+        return show_result(
+            "I heard a request for an alarm but cannot schedule it reliably; "
+            "I tried to open your desktop clock app."
+        )
+
     return show_result(f"Sorry, I don't understand '{cleaned_command}' yet.")

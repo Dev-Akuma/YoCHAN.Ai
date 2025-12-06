@@ -6,12 +6,15 @@ import time
 import signal
 import json
 
+# External speech libs (must be installed on the host)
 import pvporcupine
 from pvrecorder import PvRecorder
 from vosk import Model, KaldiRecognizer
 import sounddevice as sd
 
-from yochan import show_notification
+# Use centralized notification helper
+from handlers import show_notification
+
 from apps import APP_COMMANDS
 from config import (
     MODEL_PATH,
@@ -111,6 +114,20 @@ GRAMMAR_PHRASES.update(
         "turn it up",
         "turn it down",
         "mute",
+
+        # --- NEW: Screenshots ---
+        "take a screenshot",
+        "screenshot",
+        "capture screen",
+        "print screen",
+
+        # --- NEW: Timers & Alarms ---
+        "set a timer",
+        "start a timer",
+        "set an alarm",
+        "alarm for",
+        "timer for",
+        "in ten minutes",  # Example time phrase
     ]
 )
 
@@ -254,8 +271,7 @@ def run_assistant_listener():
         recorder.start()
         show_notification(
             ASSISTANT_DISPLAY_NAME,
-            "Background listener is active.",
-            icon="audio-volume-high",
+            "Background listener is active."
         )
 
     except Exception as e:
@@ -275,32 +291,38 @@ def run_assistant_listener():
             if keyword_index >= 0:
                 show_notification(
                     ASSISTANT_DISPLAY_NAME,
-                    "Listening... Speak your command now.",
+                    "Listening... Speak your command now."
                 )
 
-                recorder.stop()
+                # temporarily stop recorder while we capture the command
+                try:
+                    recorder.stop()
+                except Exception:
+                    # some PvRecorder versions don't have stop(); ignore
+                    pass
+
                 user_command = listen_for_command()
 
                 if user_command:
                     # Phase 1: route through offline NLU/intent engine
                     response = handle_voice_input(user_command)
 
-                    # Optional: show what was heard (useful for debugging)
-                    # show_notification(
-                    #     ASSISTANT_DISPLAY_NAME,
-                    #     f"Heard: '{user_command}'",
-                    # )
-
+                    # If the offline engine asked to quit the listener, break
                     if response == "QUIT_LISTENER":
                         break
                 else:
                     show_notification(
                         ASSISTANT_DISPLAY_NAME,
-                        "Command not detected. Please try again.",
+                        "Command not detected. Please try again."
                     )
 
                 time.sleep(0.5)
-                recorder.start()
+
+                # restart recorder (best-effort)
+                try:
+                    recorder.start()
+                except Exception:
+                    pass
 
     except KeyboardInterrupt:
         pass
@@ -310,8 +332,11 @@ def run_assistant_listener():
             try:
                 recorder.delete()
             except Exception:
-                # Fallback: just ignore if delete() is not available
-                pass
+                # Fallback: try stopping if delete not available
+                try:
+                    recorder.stop()
+                except Exception:
+                    pass
 
         if porcupine is not None:
             try:
@@ -319,8 +344,8 @@ def run_assistant_listener():
             except Exception:
                 pass
 
-        # FIX for Process Persistence: Send SIGTERM to the current process
-        os.kill(os.getpid(), signal.SIGTERM)
+        # Exit cleanly
+        sys.exit(0)
 
 
 # Backwards-compatible name (old code may still call this)
