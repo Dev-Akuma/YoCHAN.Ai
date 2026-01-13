@@ -3,322 +3,136 @@
 import os
 import sys
 import time
-import signal
 import json
 
-# External speech libs (must be installed on the host)
 import pvporcupine
 from pvrecorder import PvRecorder
 from vosk import Model, KaldiRecognizer
 import sounddevice as sd
 
-# Use centralized notification helper
-from handlers import show_notification
+from handlers import notify
+from ai_core import handle_voice_input
 
-from apps import APP_COMMANDS
 from config import (
     MODEL_PATH,
     LISTEN_DURATION,
     ACCESS_KEY,
     WAKE_WORD_PATH,
     VOSK_SAMPLE_RATE,
-    ASSISTANT_NAME,
     ASSISTANT_DISPLAY_NAME,
 )
-from ai_core import handle_voice_input  # <-- Phase 1: offline NLU/intents
 
+# -------------------------------------------------
+# Validation
+# -------------------------------------------------
 
-# =========================================================
-# === BUILD GRAMMAR FOR VOSK (LIMIT VOCABULARY) ===========
-# =========================================================
-
-GRAMMAR_PHRASES = set()
-
-# 1) Add all app names (keys in APP_COMMANDS) – includes user JSON overrides
-for phrase in APP_COMMANDS.keys():
-    GRAMMAR_PHRASES.add(phrase)
-
-# 2) Add power/control words
-GRAMMAR_PHRASES.update(
-    [
-        "shutdown",
-        "turn off",
-        "restart",
-        "reboot",
-        "sleep",
-        "suspend",
-        "logout",
-        "log out",
-        "log off",
-        "volume",
-        "brightness",
-        "clipboard",
-        "show clipboard",
-        "close all",
-        "kill all",
-    ]
-)
-
-# 3) Common helper verbs + quit keyword
-GRAMMAR_PHRASES.update(
-    [
-        "open",
-        "launch",
-        "start",
-        "run",
-        "close",
-        "quit",
-        "exit",
-        "die",
-    ]
-)
-
-# 4) Extra natural-language phrases to help Vosk with contexty speech
-GRAMMAR_PHRASES.update(
-    [
-        # polite / filler stuff that often appears around commands
-        "please",
-        "can you",
-        "could you",
-        "will you",
-        "would you",
-        "yochan",
-        "yo chan",
-
-        # contextual pronouns
-        "close that",
-        "close it",
-        "open that",
-        "open it again",
-
-        # brightness phrases
-        "bit brighter",
-        "little brighter",
-        "bit darker",
-        "little darker",
-        "increase brightness",
-        "decrease brightness",
-        "lower brightness",
-        "raise brightness",
-        "dim it",
-
-        # volume phrases
-        "bit louder",
-        "little louder",
-        "bit quieter",
-        "little quieter",
-        "increase volume",
-        "decrease volume",
-        "lower volume",
-        "raise volume",
-        "turn it up",
-        "turn it down",
-        "mute",
-
-        # --- NEW: Screenshots ---
-        "take a screenshot",
-        "screenshot",
-        "capture screen",
-        "print screen",
-
-        # --- NEW: Timers & Alarms ---
-        "set a timer",
-        "start a timer",
-        "set an alarm",
-        "alarm for",
-        "timer for",
-        "in ten minutes",  # Example time phrase
-    ]
-)
-
-
-# =========================================================
-# === VALIDATION & MODEL INITIALIZATION ===================
-# =========================================================
-
-if not all([MODEL_PATH, ACCESS_KEY, WAKE_WORD_PATH]):
-    print(
-        "\nFATAL ERROR: One or more critical variables are missing from the .env file.",
-        file=sys.stderr,
-    )
-    sys.exit(1)
-
-# Sanity Check 1: Verify Vosk Model Path Exists
 if not os.path.isdir(MODEL_PATH):
-    print(
-        f"\nFATAL ERROR: Vosk Model directory not found at: {MODEL_PATH}",
-        file=sys.stderr,
-    )
+    print(f"Vosk model not found: {MODEL_PATH}", file=sys.stderr)
     sys.exit(1)
 
+# -------------------------------------------------
+# Load Vosk model
+# -------------------------------------------------
 
-def _resolve_keyword_paths(base_path: str):
-    """
-    Support both:
-      - Single wake-word file (old behavior)
-      - Directory containing multiple Porcupine keyword files (.ppn)
-        (for user-custom wake words)
-    """
-    if os.path.isfile(base_path):
-        return [base_path]
+VOSK_MODEL = Model(MODEL_PATH)
 
-    if os.path.isdir(base_path):
-        keyword_paths = []
-        for fname in os.listdir(base_path):
-            lower = fname.lower()
-            if lower.endswith(".ppn"):  # Porcupine keyword file
-                keyword_paths.append(os.path.join(base_path, fname))
+# -------------------------------------------------
+# Resolve wake word(s)
+# -------------------------------------------------
 
-        if not keyword_paths:
-            print(
-                f"\nFATAL ERROR: No .ppn wake-word files found in directory: {base_path}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+def resolve_keywords(path: str):
+    if os.path.isfile(path):
+        return [path]
+    if os.path.isdir(path):
+        return [
+            os.path.join(path, f)
+            for f in os.listdir(path)
+            if f.lower().endswith(".ppn")
+        ]
+    raise RuntimeError("Invalid WAKE_WORD_PATH")
 
-        return keyword_paths
+KEYWORD_PATHS = resolve_keywords(WAKE_WORD_PATH)
 
-    print(
-        f"\nFATAL ERROR: Porcupine Wake Word path is neither a file nor directory: {base_path}",
-        file=sys.stderr,
-    )
-    sys.exit(1)
-
-
-KEYWORD_PATHS = _resolve_keyword_paths(WAKE_WORD_PATH)
-
-try:
-    VOSK_MODEL = Model(MODEL_PATH)
-except Exception as e:
-    print(
-        f"\nFATAL ERROR: Could not load Vosk Model from {MODEL_PATH}. Details: {e}",
-        file=sys.stderr,
-    )
-    sys.exit(1)
-
-
-# =========================================================
-# === SPEECH-TO-TEXT LISTENER =============================
-# =========================================================
+# -------------------------------------------------
+# Speech capture (FREE FORM, STREAMING)
+# -------------------------------------------------
 
 def listen_for_command() -> str:
-    """
-    Record LISTEN_DURATION seconds of audio and transcribe using Vosk,
-    constrained by GRAMMAR_PHRASES for better accuracy.
-    """
-    rec = KaldiRecognizer(
-        VOSK_MODEL,
-        VOSK_SAMPLE_RATE,
-        json.dumps(list(GRAMMAR_PHRASES)),
-    )
+    notify("STT", "Recording command...")
+
+    rec = KaldiRecognizer(VOSK_MODEL, VOSK_SAMPLE_RATE)
+    rec.SetWords(True)
 
     try:
-        audio_data = sd.rec(
-            int(VOSK_SAMPLE_RATE * LISTEN_DURATION),
+        def callback(indata, frames, time_info, status):
+            if status:
+                print(status, file=sys.stderr)
+            rec.AcceptWaveform(bytes(indata))
+
+        with sd.RawInputStream(
             samplerate=VOSK_SAMPLE_RATE,
-            channels=1,
+            blocksize=16000,
             dtype="int16",
-        )
-        sd.wait()
+            channels=1,
+            callback=callback,
+        ):
+            time.sleep(LISTEN_DURATION)
 
-        rec.AcceptWaveform(audio_data.tobytes())
         result = json.loads(rec.FinalResult())
+        text = result.get("text", "").strip()
 
-        command = result.get("text", "").strip()
-        return command
+        if text:
+            notify("STT", f"Heard: '{text}'")
+        else:
+            notify("STT", "Empty STT result", critical=True)
+
+        return text
 
     except Exception as e:
-        print(f"[{ASSISTANT_NAME}] STT Error: {e}", file=sys.stderr)
+        notify("ERROR", f"STT failure: {e}", critical=True)
         return ""
 
-
-# =========================================================
-# === MAIN WAKE WORD LOOP =================================
-# =========================================================
+# -------------------------------------------------
+# Main loop
+# -------------------------------------------------
 
 def run_assistant_listener():
-    """
-    Main wake-word listener loop.
+    notify("SYSTEM", "Starting YoChan")
 
-    Uses Porcupine + PvRecorder to detect one or more wake words
-    (from KEYWORD_PATHS) and then records a short command for Vosk.
-    The recognized text is passed to ai_core.handle_voice_input for
-    offline, context-aware intent handling.
-    """
-    porcupine = None
-    recorder = None
+    porcupine = pvporcupine.create(
+        access_key=ACCESS_KEY,
+        keyword_paths=KEYWORD_PATHS,
+        sensitivities=[0.9] * len(KEYWORD_PATHS),
+    )
 
-    # 1. Initialize Porcupine (Wake Word Engine)
-    try:
-        porcupine = pvporcupine.create(
-            access_key=ACCESS_KEY,
-            keyword_paths=KEYWORD_PATHS,
-            sensitivities=[0.9] * len(KEYWORD_PATHS),
-        )
-    except Exception as e:
-        print(
-            f"\nFATAL ERROR: Failed to initialize Porcupine. Details: {e}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    recorder = PvRecorder(
+        device_index=-1,
+        frame_length=porcupine.frame_length,
+    )
+    recorder.start()
 
-    # 2. Initialize PvRecorder (Efficient Listener)
-    try:
-        recorder = PvRecorder(
-            device_index=-1,
-            frame_length=porcupine.frame_length,
-        )
-        recorder.start()
-        show_notification(
-            ASSISTANT_DISPLAY_NAME,
-            "Background listener is active."
-        )
-
-    except Exception as e:
-        print(
-            "\nFATAL ERROR: Could not start recorder. Check microphone access. "
-            f"Details: {e}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    notify("SYSTEM", "Wake-word listener active", critical=True)
 
     try:
         while True:
             pcm = recorder.read()
-            keyword_index = porcupine.process(pcm)
+            if porcupine.process(pcm) >= 0:
+                notify("WAKE", "Wake word detected", critical=True)
 
-            # --- WAKE WORD DETECTED ---
-            if keyword_index >= 0:
-                show_notification(
-                    ASSISTANT_DISPLAY_NAME,
-                    "Listening... Speak your command now."
-                )
-
-                # temporarily stop recorder while we capture the command
                 try:
                     recorder.stop()
                 except Exception:
-                    # some PvRecorder versions don't have stop(); ignore
                     pass
 
-                user_command = listen_for_command()
-
-                if user_command:
-                    # Phase 1: route through offline NLU/intent engine
-                    response = handle_voice_input(user_command)
-
-                    # If the offline engine asked to quit the listener, break
-                    if response == "QUIT_LISTENER":
-                        break
+                text = listen_for_command()
+                if text:
+                    result = handle_voice_input(text)
+                    notify("RESULT", result)
                 else:
-                    show_notification(
-                        ASSISTANT_DISPLAY_NAME,
-                        "Command not detected. Please try again."
-                    )
+                    notify("ERROR", "No command detected")
 
-                time.sleep(0.5)
+                time.sleep(0.4)
 
-                # restart recorder (best-effort)
                 try:
                     recorder.start()
                 except Exception:
@@ -327,31 +141,9 @@ def run_assistant_listener():
     except KeyboardInterrupt:
         pass
     finally:
-        # Crucial cleanup step to release resources
-        if recorder is not None:
-            try:
-                recorder.delete()
-            except Exception:
-                # Fallback: try stopping if delete not available
-                try:
-                    recorder.stop()
-                except Exception:
-                    pass
-
-        if porcupine is not None:
-            try:
-                porcupine.delete()
-            except Exception:
-                pass
-
-        # Exit cleanly
+        recorder.delete()
+        porcupine.delete()
         sys.exit(0)
-
-
-# Backwards-compatible name (old code may still call this)
-def run_yo_chan_listener():
-    run_assistant_listener()
-
 
 if __name__ == "__main__":
     run_assistant_listener()
